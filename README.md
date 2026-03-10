@@ -70,7 +70,7 @@ npm test
 
 ### Linux / macOS
 
-脚本：`/Users/raymondj/Documents/Raymond/personal/financial/scripts/bootstrap-and-start.sh`
+脚本：`scripts/bootstrap-and-start.sh`
 
 默认行为：
 - 自动安装系统依赖（Linux apt / macOS 仅在必要时 brew）
@@ -79,13 +79,13 @@ npm test
 - Linux 优先用 `systemd` 拉起服务；其他环境回退 `nohup`
 
 ```bash
-cd /Users/raymondj/Documents/Raymond/personal/financial
+cd <项目目录>
 ./scripts/bootstrap-and-start.sh --port 3000 --database-path /data/fund-valuation.db
 ```
 
 ### Windows (PowerShell)
 
-脚本：`/Users/raymondj/Documents/Raymond/personal/financial/scripts/bootstrap-and-start.ps1`
+脚本：`scripts/bootstrap-and-start.ps1`
 
 默认行为：
 - 自动安装 Node.js LTS（优先 `winget`，其次 `choco`）

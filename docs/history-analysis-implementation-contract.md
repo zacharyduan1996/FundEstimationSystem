@@ -10,7 +10,7 @@
 
 ## 2. 设计源与节点定位（Pencil）
 
-- 设计文件：`/Users/raymondj/Documents/Raymond/personal/financial/fund-valuation-demo.pen`
+- 设计文件：`fund-valuation-demo.pen`
 - 主画板
   - Web Dashboard：`tSbS5`
   - Mobile Dashboard：`zpsgv`
@@ -159,4 +159,3 @@ export interface HistoryUIStateExtension {
 - [ ] 全局四态可触发并文案正确
 - [ ] 删除确认弹窗行为与焦点回归正确
 - [ ] 五个断点无闪屏、无布局跳动、无裁切
-
