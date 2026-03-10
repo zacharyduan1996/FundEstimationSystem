@@ -83,10 +83,10 @@ npm run dev
 ### 测试与构建
 
 ```bash
-npm test
-npm run build
-npm run start
+npm run verify
 ```
+
+`verify` 会执行：lint + typecheck + test + build
 
 ## 一键启动（普通用户）
 
@@ -113,6 +113,15 @@ npm run start
 - 延迟阈值：`180s`
 - 重试回退：`2s`、`5s`
 - 数据保留：日内点位保留 `30 天`
+
+## 工程化规范
+
+- 默认开发分支：`develop`（`main` 仅用于稳定发布）
+- 开发前从 `develop` 拉分支，PR 合并回 `develop`
+- 提交前必须执行 `npm run verify`
+- 提交信息使用 Conventional Commits（`feat:` / `fix:` / `docs:` 等）
+- 详细规范见：`docs/engineering-standards.md`
+- Agent 约束见：`AGENTS.md`
 
 ## 环境变量
 

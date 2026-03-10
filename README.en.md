@@ -83,10 +83,10 @@ Open: [http://localhost:3000](http://localhost:3000)
 ### Test & Build
 
 ```bash
-npm test
-npm run build
-npm run start
+npm run verify
 ```
+
+`verify` runs: lint + typecheck + test + build.
 
 ## One-Click Start (Users)
 
@@ -113,6 +113,15 @@ Scripts automatically:
 - Stale threshold: `180s`
 - Retry delays: `2s`, `5s`
 - Data retention: `30 days` for intraday points
+
+## Engineering Standards
+
+- Default development branch: `develop` (`main` is for stable releases only)
+- Create feature branches from `develop` and merge PRs back into `develop`
+- Run `npm run verify` before commit/PR
+- Use Conventional Commits (`feat:`, `fix:`, `docs:`, etc.)
+- Full standards: `docs/engineering-standards.md`
+- Agent constraints: `AGENTS.md`
 
 ## Environment Variable
 

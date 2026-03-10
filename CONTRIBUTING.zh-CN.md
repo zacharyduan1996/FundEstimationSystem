@@ -5,7 +5,7 @@
 ## 1）提交流程
 
 1. Fork 本仓库
-2. 从 `main` 创建分支
+2. 从 `develop` 创建分支
 3. 完成修改
 4. 必要时补充/更新测试
 5. 确保检查通过
@@ -13,9 +13,10 @@
 
 ```bash
 git checkout -b feat/your-change
-npm test
-npm run build
+npm run verify
 ```
+
+PR 目标分支：`develop`
 
 ## 2）提交规范
 
@@ -37,8 +38,7 @@ npm run build
 ## 4）PR 检查清单
 
 - [ ] PR 描述清晰说明目的和范围
-- [ ] `npm test` 通过
-- [ ] `npm run build` 通过
+- [ ] `npm run verify` 通过
 - [ ] 未引入密钥或本机路径
 - [ ] README/文档已更新（如有行为变化）
 

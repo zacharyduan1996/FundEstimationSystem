@@ -870,9 +870,10 @@ export default function Dashboard() {
   }, [fetchFunds]);
 
   useEffect(() => {
+    const historyAbortMap = historyAbortRef.current;
     return () => {
       fetchAbortRef.current?.abort();
-      Object.values(historyAbortRef.current).forEach((controller) => controller.abort());
+      Object.values(historyAbortMap).forEach((controller) => controller.abort());
     };
   }, []);
 
