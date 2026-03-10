@@ -1,0 +1,13 @@
+.next
+.next*
+node_modules
+coverage
+.DS_Store
+.codex
+
+*.log
+*.pid
+
+fund-valuation.db
+fund-valuation.db-shm
+fund-valuation.db-wal
