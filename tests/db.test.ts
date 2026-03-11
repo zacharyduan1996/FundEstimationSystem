@@ -2,17 +2,28 @@ import {
   addWatchlistItemWithStatus,
   addWatchlistItem,
   countIntradayPointsForCodeAndTs,
+  createDecisionChecklistItem,
+  createFundReviewNote,
   createFundGroup,
   createIsolatedDb,
+  deleteDecisionChecklistItem,
+  deleteWatchlistItems,
   deleteWatchlistItem,
   deletePositionSnapshot,
+  getDecisionSummaryByCodes,
+  getGroupPerformanceSummary,
   getHistoryPoints,
   insertIntradayPoint,
+  listDecisionChecklistItems,
   listFundGroups,
+  listFundReviewNotes,
   listGroupTabs,
   listFundCards,
   reorderFundGroups,
+  setFundGroupsForCodes,
   setFundGroupsForCode,
+  updateDecisionChecklistItem,
+  updateFundReviewNote,
   upsertPositionSnapshot
 } from "@/lib/db";
 import { detectFundInstrumentType } from "@/lib/fund-kind";
@@ -288,5 +299,201 @@ describe("database fund queries", () => {
     reorderFundGroups([g3.id, g1.id, g2.id], db);
     const groups = listFundGroups(db);
     expect(groups.map((group) => group.name)).toEqual(["组C", "组A", "组B"]);
+  });
+
+  it("calculates group performance summary with 7D return", () => {
+    const db = createIsolatedDb(":memory:");
+    addWatchlistItem("161725", db);
+    addWatchlistItem("110011", db);
+
+    insertIntradayPoint(
+      {
+        code: "161725",
+        name: "A",
+        nav: 1,
+        estimatedNav: 1.1,
+        deltaPercent: 2,
+        quoteTs: "2026-03-01T07:00:00.000Z",
+        asOfDate: "2026-03-01",
+        asOfTime: "15:00:00",
+        instrumentType: detectFundInstrumentType("161725"),
+        source: "eastmoney_estimation"
+      },
+      db
+    );
+    insertIntradayPoint(
+      {
+        code: "161725",
+        name: "A",
+        nav: 1,
+        estimatedNav: 1.2,
+        deltaPercent: 4,
+        quoteTs: "2026-03-07T07:00:00.000Z",
+        asOfDate: "2026-03-07",
+        asOfTime: "15:00:00",
+        instrumentType: detectFundInstrumentType("161725"),
+        source: "eastmoney_estimation"
+      },
+      db
+    );
+
+    insertIntradayPoint(
+      {
+        code: "110011",
+        name: "B",
+        nav: 1,
+        estimatedNav: 2,
+        deltaPercent: -1,
+        quoteTs: "2026-03-01T07:00:00.000Z",
+        asOfDate: "2026-03-01",
+        asOfTime: "15:00:00",
+        instrumentType: detectFundInstrumentType("110011"),
+        source: "eastmoney_estimation"
+      },
+      db
+    );
+    insertIntradayPoint(
+      {
+        code: "110011",
+        name: "B",
+        nav: 1,
+        estimatedNav: 2.2,
+        deltaPercent: 2,
+        quoteTs: "2026-03-07T07:00:00.000Z",
+        asOfDate: "2026-03-07",
+        asOfTime: "15:00:00",
+        instrumentType: detectFundInstrumentType("110011"),
+        source: "eastmoney_estimation"
+      },
+      db
+    );
+
+    const summary = getGroupPerformanceSummary("all", "2026-03-07", db);
+    expect(summary.memberCount).toBe(2);
+    expect(summary.todayAvgDeltaPct).toBe(3);
+    expect(summary.sevenDayReturnPct).toBe(9.55);
+  });
+
+  it("supports batch group assignment and batch delete", () => {
+    const db = createIsolatedDb(":memory:");
+    addWatchlistItem("161725", db);
+    addWatchlistItem("110011", db);
+    addWatchlistItem("007049", db);
+
+    const group = createFundGroup("核心", db);
+    const assigned = setFundGroupsForCodes(["161725", "110011"], [group.id], db);
+    expect(assigned.updatedCount).toBe(2);
+
+    const inGroup = listFundCards({ groupFilter: group.id, date: "2026-03-07" }, db);
+    expect(inGroup.map((item) => item.code).sort()).toEqual(["110011", "161725"]);
+
+    const deleted = deleteWatchlistItems(["110011", "007049"], db);
+    expect(deleted.deletedCount).toBe(2);
+    expect(listFundCards({ date: "2026-03-07" }, db).map((item) => item.code)).toEqual(["161725"]);
+  });
+
+  it("supports review note CRUD and latest review on card", () => {
+    const db = createIsolatedDb(":memory:");
+    addWatchlistItem("161725", db);
+    seedPoint(db, {
+      code: "161725",
+      name: "A",
+      nav: 1,
+      estimatedNav: 1.01,
+      deltaPercent: 1,
+      quoteTs: "2026-03-07T02:00:00.000Z"
+    });
+
+    const created = createFundReviewNote(
+      {
+        code: "161725",
+        title: "半导体午后回撤复盘",
+        reviewDate: "2026-03-07",
+        expectation: "预计震荡",
+        result: "午后回落",
+        reason: "板块走弱",
+        actionPlan: "下次分批减仓",
+        tags: ["半导体", "回撤"]
+      },
+      db
+    );
+    expect(created.tags).toEqual(["半导体", "回撤"]);
+
+    const updated = updateFundReviewNote(
+      {
+        id: created.id,
+        code: "161725",
+        title: "半导体弱反弹复盘",
+        reviewDate: "2026-03-07",
+        expectation: "预计反弹",
+        result: "弱反弹",
+        reason: "成交量不足",
+        actionPlan: "等待确认",
+        tags: ["复盘"]
+      },
+      db
+    );
+    expect(updated.result).toBe("弱反弹");
+
+    const notes = listFundReviewNotes("161725", db);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.title).toBe("半导体弱反弹复盘");
+    expect(notes[0]?.expectation).toBe("预计反弹");
+
+    const card = listFundCards({ date: "2026-03-07" }, db)[0];
+    expect(card?.latestReview?.id).toBe(created.id);
+  });
+
+  it("supports decision checklist CRUD, summary, and archive to review", () => {
+    const db = createIsolatedDb(":memory:");
+    addWatchlistItem("161725", db);
+
+    const created = createDecisionChecklistItem(
+      {
+        code: "161725",
+        tradeDate: "2026-03-10",
+        triggerCondition: "跌破 2.26",
+        actionPlan: "减仓 20%",
+        invalidCondition: "放量反包",
+        reviewNote: "",
+        status: "todo",
+        priority: "high"
+      },
+      db
+    );
+
+    const list = listDecisionChecklistItems("161725", "2026-03-10", db);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.id).toBe(created.id);
+    expect(list[0]?.status).toBe("todo");
+
+    const summaryTodo = getDecisionSummaryByCodes(["161725"], "2026-03-10", db);
+    expect(summaryTodo["161725"]?.todoCount).toBe(1);
+
+    updateDecisionChecklistItem(
+      {
+        id: created.id,
+        code: "161725",
+        tradeDate: "2026-03-10",
+        triggerCondition: "跌破 2.26",
+        actionPlan: "减仓 20%",
+        invalidCondition: "放量反包",
+        reviewNote: "执行后回撤收窄",
+        status: "done",
+        priority: "high"
+      },
+      db
+    );
+
+    const summaryDone = getDecisionSummaryByCodes(["161725"], "2026-03-10", db);
+    expect(summaryDone["161725"]?.doneCount).toBe(1);
+    expect(summaryDone["161725"]?.todoCount).toBe(0);
+
+    const notes = listFundReviewNotes("161725", db);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.result).toBe("执行后回撤收窄");
+
+    expect(deleteDecisionChecklistItem(created.id, "161725", db)).toBe(true);
+    expect(deleteDecisionChecklistItem(created.id, "161725", db)).toBe(false);
   });
 });

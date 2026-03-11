@@ -48,7 +48,19 @@ A local real-time fund estimation system with adaptive Web + Mobile UI. It provi
 
 ![History Panel](./docs/images/history-panel.png)
 
-### 5) Search, Sort, and Privacy
+### 5) Intraday Notes + Review Workspace
+
+- Use the right sidebar for real-time intraday notes (press Enter to save quickly)
+- Click `Open Review` to enter the dual-pane review workspace (history titles on left, editor on right)
+- Supports title search, date-grouped browsing, and `Cmd/Ctrl+S` quick save
+
+### 6) Intraday Workspace Shortcuts
+
+- The main area uses a 3-column fund-card grid so you can scan more funds at once
+- Keyboard support: `↑/↓/←/→` switch focused fund, `/` focus search, `n` focus note input
+- Review modal shortcuts: `Esc` close, `↑/↓` switch notes, `Cmd/Ctrl+S` save
+
+### 7) Search, Sort, and Privacy
 
 - Search by code (Enter to query immediately)
 - Sort by default / gain first / loss first
@@ -61,6 +73,8 @@ A local real-time fund estimation system with adaptive Web + Mobile UI. It provi
 - Group CRUD, reorder, multi-group mapping, ungrouped view
 - Position snapshot with value and PnL metrics
 - Multi-range historical NAV analysis
+- Intraday workspace: 3-column main cards + right real-time note sidebar
+- Notes workflow: intraday quick notes + dual-pane review workspace
 - Empty/no-result/error/stale/loading state handling
 - One-click bootstrap for macOS and Windows
 
@@ -136,6 +150,14 @@ Scripts automatically:
 - `POST /api/v1/funds`
 - `DELETE /api/v1/funds/{code}`
 - `PUT /api/v1/funds/{code}/groups`
+- `GET /api/v1/funds/{code}/checklist`
+- `POST /api/v1/funds/{code}/checklist`
+- `PUT /api/v1/funds/{code}/checklist/{id}`
+- `DELETE /api/v1/funds/{code}/checklist/{id}`
+- `GET /api/v1/funds/{code}/reviews`
+- `POST /api/v1/funds/{code}/reviews` (`title` is required)
+- `PUT /api/v1/funds/{code}/reviews/{id}` (supports updating `title`)
+- `DELETE /api/v1/funds/{code}/reviews/{id}`
 - `GET /api/v1/funds/{code}/trend?date=YYYY-MM-DD`
 - `GET /api/v1/funds/{code}/history?range=7D|30D|90D|180D|1Y`
 
@@ -151,6 +173,11 @@ Scripts automatically:
 - `PATCH /api/v1/groups/{id}`
 - `DELETE /api/v1/groups/{id}`
 - `PUT /api/v1/groups/reorder`
+
+### Batch
+
+- `PUT /api/v1/funds/batch/groups`
+- `DELETE /api/v1/funds/batch`
 
 ### System
 

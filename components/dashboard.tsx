@@ -1,13 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
   Calendar,
   Check,
+  CheckSquare2,
   ChartNoAxesCombined,
+  ClipboardList,
   Clock3,
   Eye,
   EyeOff,
@@ -20,6 +22,7 @@ import {
   Search,
   Settings2,
   SlidersHorizontal,
+  Square,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -31,8 +34,12 @@ import Sparkline from "@/components/sparkline";
 import { REFRESH_INTERVAL_MS } from "@/lib/constants";
 import { DEFAULT_HISTORY_RANGE } from "@/lib/history";
 import type {
+  DecisionChecklistItem,
+  DecisionChecklistPriority,
+  FundReviewNote,
   FundCardData,
   FundGroup,
+  GroupPerformanceSummary,
   FundHistoryAnalysis,
   GroupFilter,
   GroupTabStat,
@@ -44,11 +51,23 @@ import type {
 } from "@/lib/types";
 
 type FundsResponse = {
+  workspace: string;
   query: string;
   sortBy: SortBy;
   groupFilter: GroupFilter;
   groups: FundGroup[];
   groupTabs: GroupTabStat[];
+  groupPerformance: GroupPerformanceSummary;
+  focusedCode: string | null;
+  decisionSummaryByFund?: Record<
+    string,
+    {
+      todoCount: number;
+      doneCount: number;
+      invalidCount: number;
+      winRateHint: number | null;
+    }
+  >;
   funds: FundCardData[];
   loadingState: LoadingState;
   lastUpdatedAt: string | null;
@@ -89,6 +108,21 @@ type GroupResponse = {
   group?: FundGroup;
   groups?: FundGroup[];
   error?: string;
+};
+
+type ReviewListResponse = {
+  code: string;
+  notes: FundReviewNote[];
+};
+
+type ReviewResponse = {
+  note: FundReviewNote;
+};
+
+type ChecklistResponse = {
+  code: string;
+  date: string;
+  items: DecisionChecklistItem[];
 };
 
 const sortOptions: Array<{ value: SortBy; label: string; icon: ReactNode }> = [
@@ -183,6 +217,13 @@ function formatDateOnly(value: string | null): string {
   });
 }
 
+function formatReviewSummary(note: FundReviewNote | null): string {
+  if (!note) {
+    return "还没有复盘记录，建议记录预期与结果，便于后续复盘。";
+  }
+  return `结果：${note.result}`;
+}
+
 function formatHistoryAxisDate(value: string | null, range: HistoryRange): string {
   if (!value) {
     return "--";
@@ -222,6 +263,16 @@ function classifyFetchFailure(error: unknown): string {
   }
 
   return "系统异常，请稍后重试";
+}
+
+function getTodayShanghaiDateString(): string {
+  const formatted = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+  return formatted;
 }
 
 function LoadingExample() {
@@ -334,6 +385,147 @@ function GroupTabBar({
   );
 }
 
+function GroupPerformanceBar({
+  summary
+}: {
+  summary: GroupPerformanceSummary | null;
+}) {
+  if (!summary) {
+    return null;
+  }
+
+  return (
+    <section className="group-performance-bar" aria-label="分组绩效看板">
+      <div className="group-performance-meta">
+        <p>{summary.groupName} · {summary.memberCount} 只</p>
+        <span>口径：简单平均（忽略空值）</span>
+      </div>
+      <div className="group-performance-metrics">
+        <div className="group-performance-item">
+          <span>当日绩效</span>
+          <strong
+            className={cn(
+              deltaClass(summary.todayAvgDeltaPct) === "rise" && "text-rise",
+              deltaClass(summary.todayAvgDeltaPct) === "fall" && "text-fall"
+            )}
+          >
+            {formatPercent(summary.todayAvgDeltaPct)}
+          </strong>
+        </div>
+        <div className="group-performance-item">
+          <span>近7天绩效</span>
+          <strong
+            className={cn(
+              deltaClass(summary.sevenDayReturnPct) === "rise" && "text-rise",
+              deltaClass(summary.sevenDayReturnPct) === "fall" && "text-fall"
+            )}
+          >
+            {formatPercent(summary.sevenDayReturnPct)}
+          </strong>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function formatNoteTime(value: string): string {
+  return new Date(value).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai"
+  });
+}
+
+function RealtimeNotesSidebar({
+  focusedFund,
+  items,
+  loading,
+  saving,
+  noteInput,
+  noteInputRef,
+  onNoteInputChange,
+  onAdd,
+  onDelete,
+  onOpenReviewEditor
+}: {
+  focusedFund: FundCardData | null;
+  items: DecisionChecklistItem[];
+  loading: boolean;
+  saving: boolean;
+  noteInput: string;
+  noteInputRef?: RefObject<HTMLInputElement | null>;
+  onNoteInputChange: (value: string) => void;
+  onAdd: () => void;
+  onDelete: (itemId: string) => void;
+  onOpenReviewEditor: (fund: FundCardData, trigger: HTMLButtonElement) => void;
+}) {
+  if (!focusedFund) {
+    return (
+      <section className="decision-panel-empty panel-switch">
+        <p>先选择一只基金，再记录盘中笔记</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="decision-panel panel-switch">
+      <header className="decision-head">
+        <div>
+          <h3>{focusedFund.code} · {focusedFund.name}</h3>
+          <p>盘中速记（实时保存）</p>
+        </div>
+        <button
+          type="button"
+          className="ghost-btn"
+          onClick={(event) => onOpenReviewEditor(focusedFund, event.currentTarget)}
+        >
+          打开复盘
+        </button>
+      </header>
+
+      <section className="note-composer">
+        <input
+          ref={noteInputRef}
+          className="modal-input"
+          placeholder="输入实时笔记，按回车快速记录"
+          value={noteInput}
+          onChange={(event) => onNoteInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              onAdd();
+            }
+          }}
+        />
+        <button type="button" className="add-fund-btn compact" onClick={onAdd} disabled={saving}>
+          {saving ? "记录中..." : "记录"}
+        </button>
+      </section>
+
+      <section className="decision-items">
+        <h4>最近记录</h4>
+        {loading ? <p className="modal-hint">加载中...</p> : null}
+        {!loading && items.length === 0 ? <p className="modal-hint">暂无记录，可先写下盘中想法。</p> : null}
+        {items.map((item) => {
+          return (
+            <article key={item.id} className="decision-item">
+              <header>
+                <strong>{item.triggerCondition}</strong>
+                <span>{formatNoteTime(item.updatedAt)}</span>
+              </header>
+              <div className="decision-item-actions">
+                <button type="button" className="danger-btn" onClick={() => onDelete(item.id)}>
+                  删除
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </section>
+    </section>
+  );
+}
+
 function FundCard({
   fund,
   expanded,
@@ -345,9 +537,16 @@ function FundCard({
   historyError,
   maskAmounts,
   positionSaving,
+  compact,
+  isSelecting,
+  isSelected,
+  focused,
   onDelete,
+  onToggleSelect,
+  onFocus,
   onOpenPositionEditor,
   onOpenGroupEditor,
+  onOpenReviewEditor,
   onToggleHistory,
   onChangeHistoryRange,
   onRetryHistory
@@ -362,9 +561,16 @@ function FundCard({
   historyError?: string | null;
   maskAmounts: boolean;
   positionSaving?: boolean;
-  onDelete: (code: string, trigger: HTMLButtonElement) => void;
+  compact?: boolean;
+  isSelecting: boolean;
+  isSelected: boolean;
+  focused: boolean;
+  onDelete: (code: string, trigger: HTMLElement) => void;
+  onToggleSelect: (code: string) => void;
+  onFocus: (code: string) => void;
   onOpenPositionEditor: (fund: FundCardData, trigger: HTMLButtonElement) => void;
   onOpenGroupEditor: (fund: FundCardData, trigger: HTMLButtonElement) => void;
+  onOpenReviewEditor: (fund: FundCardData, trigger: HTMLButtonElement) => void;
   onToggleHistory: (code: string) => void;
   onChangeHistoryRange: (code: string, range: HistoryRange) => void;
   onRetryHistory: (code: string) => void;
@@ -380,10 +586,38 @@ function FundCard({
   const overflowCount = Math.max(fund.groups.length - visibleGroups.length, 0);
 
   return (
-    <article className="fund-card">
+    <article
+      className={cn(
+        "fund-card",
+        compact && "fund-card-compact",
+        isSelecting && isSelected && "fund-card-selected",
+        focused && "fund-card-focused"
+      )}
+      onClick={() => onFocus(fund.code)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onFocus(fund.code);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-pressed={focused}
+      data-fund-code={fund.code}
+    >
       <div className="card-top">
         <div className="card-info">
           <div className="card-title-row">
+            {isSelecting ? (
+              <button
+                type="button"
+                className="select-toggle"
+                onClick={() => onToggleSelect(fund.code)}
+                aria-label={`${isSelected ? "取消选择" : "选择"}基金 ${fund.code}`}
+              >
+                {isSelected ? <CheckSquare2 size={14} /> : <Square size={14} />}
+              </button>
+            ) : null}
             <ChartNoAxesCombined size={16} className="text-accent" />
             <h2>{fund.name}</h2>
           </div>
@@ -411,14 +645,16 @@ function FundCard({
             编辑分组
           </button>
         </div>
-        <button
-          className="delete-btn"
-          type="button"
-          onClick={(event) => onDelete(fund.code, event.currentTarget)}
-          aria-label={`删除基金 ${fund.code}`}
-        >
-          <Trash2 size={18} />
-        </button>
+        {isSelecting ? null : (
+          <button
+            className="delete-btn"
+            type="button"
+            onClick={(event) => onDelete(fund.code, event.currentTarget)}
+            aria-label={`删除基金 ${fund.code}`}
+          >
+            <Trash2 size={18} />
+          </button>
+        )}
       </div>
 
       <div className="metrics-row">
@@ -440,7 +676,40 @@ function FundCard({
         </div>
       </div>
 
-      {metrics.hasPosition ? (
+      <div className="card-quick-actions">
+        <button
+          type="button"
+          className="quick-action-btn"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenPositionEditor(fund, event.currentTarget);
+          }}
+        >
+          持仓
+        </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenGroupEditor(fund, event.currentTarget);
+          }}
+        >
+          分组
+        </button>
+        <button
+          type="button"
+          className="quick-action-btn"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenReviewEditor(fund, event.currentTarget);
+          }}
+        >
+          复盘
+        </button>
+      </div>
+
+      {!compact && metrics.hasPosition ? (
         <section className="position-block">
           <div className="position-head">
             <div className="position-title-wrap">
@@ -494,7 +763,7 @@ function FundCard({
             </div>
           </div>
         </section>
-      ) : (
+      ) : !compact ? (
         <section className="position-empty-block">
           <Wallet size={14} className="text-muted" />
           <p>尚未录入持仓，无法计算你的盈亏</p>
@@ -507,7 +776,7 @@ function FundCard({
             录入持仓
           </button>
         </section>
-      )}
+      ) : null}
 
       <div className="time-row">
         <Calendar size={14} className="text-muted" />
@@ -540,7 +809,27 @@ function FundCard({
         </div>
       </div>
 
-      <button
+      {!compact ? (
+        <section className="review-summary">
+          <div className="review-summary-head">
+            <span className="review-summary-title">
+              <ClipboardList size={13} />
+              复盘笔记
+            </span>
+            <button
+              type="button"
+              className="review-edit-btn"
+              onClick={(event) => onOpenReviewEditor(fund, event.currentTarget)}
+            >
+              {fund.latestReview ? "编辑复盘" : "新增复盘"}
+            </button>
+          </div>
+          <p className="review-summary-body">{formatReviewSummary(fund.latestReview)}</p>
+        </section>
+      ) : null}
+
+      {!compact ? (
+        <button
         type="button"
         className={cn("history-toggle", expanded && "active")}
         onClick={() => onToggleHistory(fund.code)}
@@ -556,8 +845,9 @@ function FundCard({
           {expanded ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
         </span>
       </button>
+      ) : null}
 
-      {expanded ? (
+      {!compact && expanded ? (
         <section id={`history-panel-${fund.code}`} className="history-panel">
           <div className="history-head">
             <div className="history-title-wrap">
@@ -662,7 +952,10 @@ export default function Dashboard() {
   const [groupFilter, setGroupFilter] = useState<GroupFilter>("all");
   const [groups, setGroups] = useState<FundGroup[]>([]);
   const [groupTabs, setGroupTabs] = useState<GroupTabStat[]>([]);
+  const [groupPerformance, setGroupPerformance] = useState<GroupPerformanceSummary | null>(null);
   const [funds, setFunds] = useState<FundCardData[]>([]);
+  const [focusedCode, setFocusedCode] = useState<string | null>(null);
+  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<"intraday" | "review">("intraday");
   const [loadingState, setLoadingState] = useState<LoadingState>("loading");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
@@ -678,6 +971,12 @@ export default function Dashboard() {
   const [renameGroupId, setRenameGroupId] = useState<string | null>(null);
   const [renameGroupValue, setRenameGroupValue] = useState("");
   const [groupManageSaving, setGroupManageSaving] = useState(false);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectedCodes, setSelectedCodes] = useState<string[]>([]);
+  const [batchActionLoading, setBatchActionLoading] = useState<"idle" | "applyGroup" | "delete">("idle");
+  const [isBatchGroupOpen, setIsBatchGroupOpen] = useState(false);
+  const [batchGroupSelection, setBatchGroupSelection] = useState<string[]>([]);
+  const [isBatchDeleteOpen, setIsBatchDeleteOpen] = useState(false);
   const [pendingDeleteCode, setPendingDeleteCode] = useState<string | null>(null);
   const [editingPositionFundCode, setEditingPositionFundCode] = useState<string | null>(null);
   const [positionFormShares, setPositionFormShares] = useState("");
@@ -691,6 +990,26 @@ export default function Dashboard() {
   const [historyStateByFund, setHistoryStateByFund] = useState<Record<string, HistoryLoadingState>>({});
   const [historyCacheByFund, setHistoryCacheByFund] = useState<HistoryCache>({});
   const [historyErrorByFund, setHistoryErrorByFund] = useState<Record<string, string | null>>({});
+  const [editingReviewFundCode, setEditingReviewFundCode] = useState<string | null>(null);
+  const [reviewNotesByFund, setReviewNotesByFund] = useState<Record<string, FundReviewNote[]>>({});
+  const [reviewLoadingByFund, setReviewLoadingByFund] = useState<Record<string, boolean>>({});
+  const [reviewSavingByFund, setReviewSavingByFund] = useState<Record<string, boolean>>({});
+  const [reviewSelectedIdByFund, setReviewSelectedIdByFund] = useState<Record<string, string | null>>({});
+  const [reviewListQueryByFund, setReviewListQueryByFund] = useState<Record<string, string>>({});
+  const [reviewDraftDirty, setReviewDraftDirty] = useState(false);
+  const [reviewMobilePane, setReviewMobilePane] = useState<"list" | "editor">("list");
+  const [editingReviewId, setEditingReviewId] = useState<string | null>(null);
+  const [reviewFormTitle, setReviewFormTitle] = useState("");
+  const [reviewFormDate, setReviewFormDate] = useState("");
+  const [reviewFormExpectation, setReviewFormExpectation] = useState("");
+  const [reviewFormResult, setReviewFormResult] = useState("");
+  const [reviewFormReason, setReviewFormReason] = useState("");
+  const [reviewFormActionPlan, setReviewFormActionPlan] = useState("");
+  const [reviewFormTags, setReviewFormTags] = useState("");
+  const [checklistByFund, setChecklistByFund] = useState<Record<string, DecisionChecklistItem[]>>({});
+  const [checklistLoadingByFund, setChecklistLoadingByFund] = useState<Record<string, boolean>>({});
+  const [checklistSavingByFund, setChecklistSavingByFund] = useState<Record<string, boolean>>({});
+  const [realtimeNoteInput, setRealtimeNoteInput] = useState("");
 
   const latestRequestIdRef = useRef(0);
   const hasLoadedRef = useRef(false);
@@ -701,11 +1020,33 @@ export default function Dashboard() {
   const historyRangeRef = useRef<Record<string, HistoryRange>>({});
   const historyCacheRef = useRef<HistoryCache>({});
   const lastFocusRef = useRef<HTMLElement | null>(null);
+  const desktopSearchRef = useRef<HTMLInputElement | null>(null);
+  const mobileSearchRef = useRef<HTMLInputElement | null>(null);
+  const noteInputRef = useRef<HTMLInputElement | null>(null);
   const addModalRef = useRef<HTMLElement | null>(null);
   const deleteModalRef = useRef<HTMLElement | null>(null);
   const positionModalRef = useRef<HTMLElement | null>(null);
   const groupManageModalRef = useRef<HTMLElement | null>(null);
   const groupEditModalRef = useRef<HTMLElement | null>(null);
+  const batchGroupModalRef = useRef<HTMLElement | null>(null);
+  const batchDeleteModalRef = useRef<HTMLElement | null>(null);
+  const reviewModalRef = useRef<HTMLElement | null>(null);
+
+  const confirmDiscardReviewDraft = useCallback((): boolean => {
+    if (!reviewDraftDirty) {
+      return true;
+    }
+    return window.confirm("当前笔记有未保存修改，确认放弃吗？");
+  }, [reviewDraftDirty]);
+
+  const closeReviewWorkspace = useCallback((): boolean => {
+    if (!confirmDiscardReviewDraft()) {
+      return false;
+    }
+    setEditingReviewFundCode(null);
+    setReviewMobilePane("list");
+    return true;
+  }, [confirmDiscardReviewDraft]);
 
   const showToast = useCallback((tone: ToastState["tone"], message: string) => {
     setToast({
@@ -718,6 +1059,14 @@ export default function Dashboard() {
   useEffect(() => {
     hasDataRef.current = funds.length > 0;
   }, [funds.length]);
+
+  useEffect(() => {
+    if (!isSelecting) {
+      return;
+    }
+    const fundSet = new Set(funds.map((fund) => fund.code));
+    setSelectedCodes((prev) => prev.filter((code) => fundSet.has(code)));
+  }, [funds, isSelecting]);
 
   useEffect(() => {
     historyRangeRef.current = historyRangeByFund;
@@ -786,7 +1135,7 @@ export default function Dashboard() {
 
       try {
         const response = await fetch(
-          `/api/v1/funds?query=${encodeURIComponent(query)}&sortBy=${sortBy}&groupId=${encodeURIComponent(String(groupFilter))}`,
+          `/api/v1/funds?workspace=intraday&query=${encodeURIComponent(query)}&sortBy=${sortBy}&groupId=${encodeURIComponent(String(groupFilter))}`,
           {
             cache: "no-store",
             signal: controller.signal
@@ -818,9 +1167,16 @@ export default function Dashboard() {
         setLastUpdatedAt(successPayload.lastUpdatedAt);
         setGroups(successPayload.groups ?? []);
         setGroupTabs(successPayload.groupTabs ?? []);
+        setGroupPerformance(successPayload.groupPerformance ?? null);
         if ((successPayload.groupTabs ?? []).every((tab) => tab.id !== groupFilter)) {
           setGroupFilter("all");
         }
+        setFocusedCode((previous) => {
+          if (previous && successPayload.funds.some((fund) => fund.code === previous)) {
+            return previous;
+          }
+          return successPayload.focusedCode ?? successPayload.funds[0]?.code ?? null;
+        });
         setErrorMessage(null);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
@@ -893,12 +1249,18 @@ export default function Dashboard() {
       ? addModalRef.current
       : pendingDeleteCode
         ? deleteModalRef.current
+        : isBatchDeleteOpen
+          ? batchDeleteModalRef.current
+          : isBatchGroupOpen
+            ? batchGroupModalRef.current
         : editingPositionFundCode
           ? positionModalRef.current
           : isGroupManageOpen
             ? groupManageModalRef.current
             : editingGroupFundCode
               ? groupEditModalRef.current
+              : editingReviewFundCode
+                ? reviewModalRef.current
               : null;
     if (!activeModal) {
       return;
@@ -919,6 +1281,12 @@ export default function Dashboard() {
         if (pendingDeleteCode) {
           setPendingDeleteCode(null);
         }
+        if (isBatchDeleteOpen) {
+          setIsBatchDeleteOpen(false);
+        }
+        if (isBatchGroupOpen) {
+          setIsBatchGroupOpen(false);
+        }
         if (editingPositionFundCode) {
           setEditingPositionFundCode(null);
         }
@@ -927,6 +1295,9 @@ export default function Dashboard() {
         }
         if (editingGroupFundCode) {
           setEditingGroupFundCode(null);
+        }
+        if (editingReviewFundCode) {
+          closeReviewWorkspace();
         }
         return;
       }
@@ -948,10 +1319,29 @@ export default function Dashboard() {
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [editingGroupFundCode, editingPositionFundCode, isAddOpen, isGroupManageOpen, pendingDeleteCode]);
+  }, [
+    editingGroupFundCode,
+    editingPositionFundCode,
+    closeReviewWorkspace,
+    editingReviewFundCode,
+    isAddOpen,
+    isBatchDeleteOpen,
+    isBatchGroupOpen,
+    isGroupManageOpen,
+    pendingDeleteCode
+  ]);
 
   useEffect(() => {
-    if (isAddOpen || pendingDeleteCode || editingPositionFundCode || isGroupManageOpen || editingGroupFundCode) {
+    if (
+      isAddOpen ||
+      pendingDeleteCode ||
+      isBatchDeleteOpen ||
+      isBatchGroupOpen ||
+      editingPositionFundCode ||
+      isGroupManageOpen ||
+      editingGroupFundCode ||
+      editingReviewFundCode
+    ) {
       return;
     }
 
@@ -959,7 +1349,106 @@ export default function Dashboard() {
       lastFocusRef.current.focus();
       lastFocusRef.current = null;
     }
-  }, [editingGroupFundCode, editingPositionFundCode, isAddOpen, isGroupManageOpen, pendingDeleteCode]);
+  }, [
+    editingGroupFundCode,
+    editingPositionFundCode,
+    editingReviewFundCode,
+    isAddOpen,
+    isBatchDeleteOpen,
+    isBatchGroupOpen,
+    isGroupManageOpen,
+    pendingDeleteCode
+  ]);
+
+  const moveFocusedFund = useCallback(
+    (offset: number) => {
+      if (funds.length === 0) {
+        return;
+      }
+      const currentIndex = focusedCode ? funds.findIndex((fund) => fund.code === focusedCode) : -1;
+      const nextIndex = Math.min(funds.length - 1, Math.max(0, currentIndex + offset));
+      const nextFund = funds[nextIndex];
+      if (!nextFund) {
+        return;
+      }
+      setFocusedCode(nextFund.code);
+      const node = document.querySelector<HTMLElement>(`[data-fund-code="${nextFund.code}"]`);
+      node?.focus();
+    },
+    [focusedCode, funds]
+  );
+
+  useEffect(() => {
+    const onKeydown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName ?? "";
+      const isEditable =
+        target?.isContentEditable ||
+        tagName === "INPUT" ||
+        tagName === "TEXTAREA" ||
+        tagName === "SELECT";
+      if (isEditable) {
+        return;
+      }
+
+      const hasModalOpen =
+        isAddOpen ||
+        Boolean(pendingDeleteCode) ||
+        isBatchDeleteOpen ||
+        isBatchGroupOpen ||
+        Boolean(editingPositionFundCode) ||
+        isGroupManageOpen ||
+        Boolean(editingGroupFundCode) ||
+        Boolean(editingReviewFundCode);
+      if (hasModalOpen) {
+        return;
+      }
+
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        event.preventDefault();
+        moveFocusedFund(1);
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveFocusedFund(-1);
+        return;
+      }
+      if ((event.key === "Delete" || event.key === "Backspace") && focusedCode && !isSelecting) {
+        event.preventDefault();
+        lastFocusRef.current = (target ?? document.body) as HTMLElement;
+        setPendingDeleteCode(focusedCode);
+        return;
+      }
+      if (event.key === "/") {
+        event.preventDefault();
+        const searchInput = window.innerWidth <= 900 ? mobileSearchRef.current : desktopSearchRef.current;
+        searchInput?.focus();
+        return;
+      }
+      if ((event.key === "n" || event.key === "N") && focusedCode) {
+        event.preventDefault();
+        noteInputRef.current?.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeydown);
+    return () => {
+      document.removeEventListener("keydown", onKeydown);
+    };
+  }, [
+    editingGroupFundCode,
+    editingPositionFundCode,
+    editingReviewFundCode,
+    focusedCode,
+    isAddOpen,
+    isBatchDeleteOpen,
+    isBatchGroupOpen,
+    isGroupManageOpen,
+    isSelecting,
+    moveFocusedFund,
+    pendingDeleteCode
+  ]);
 
   const onOpenAddModal = useCallback((trigger: HTMLElement) => {
     lastFocusRef.current = trigger;
@@ -967,7 +1456,7 @@ export default function Dashboard() {
     setNewFundGroupIds([]);
   }, []);
 
-  const onOpenDeleteModal = useCallback((code: string, trigger: HTMLButtonElement) => {
+  const onOpenDeleteModal = useCallback((code: string, trigger: HTMLElement) => {
     lastFocusRef.current = trigger;
     setPendingDeleteCode(code);
   }, []);
@@ -1012,6 +1501,116 @@ export default function Dashboard() {
     setQueryInput("");
     setQuery("");
   }, []);
+
+  const onToggleSelectFund = useCallback((code: string) => {
+    setSelectedCodes((prev) => (prev.includes(code) ? prev.filter((item) => item !== code) : [...prev, code]));
+  }, []);
+
+  const onStartSelect = useCallback(() => {
+    setIsSelecting(true);
+    setSelectedCodes([]);
+  }, []);
+
+  const onCancelSelect = useCallback(() => {
+    setIsSelecting(false);
+    setSelectedCodes([]);
+    setBatchActionLoading("idle");
+  }, []);
+
+  const parseTagInput = useCallback((value: string): string[] => {
+    return value
+      .split(/[，,]/)
+      .map((item) => item.trim())
+      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index);
+  }, []);
+
+  const resetReviewForm = useCallback((note?: FundReviewNote | null) => {
+    if (note) {
+      setEditingReviewId(note.id);
+      setReviewFormTitle(note.title);
+      setReviewFormDate(note.reviewDate);
+      setReviewFormExpectation(note.expectation);
+      setReviewFormResult(note.result);
+      setReviewFormReason(note.reason);
+      setReviewFormActionPlan(note.actionPlan);
+      setReviewFormTags(note.tags.join(","));
+      setReviewDraftDirty(false);
+      return;
+    }
+    setEditingReviewId(null);
+    setReviewFormTitle("");
+    setReviewFormDate(new Date().toISOString().slice(0, 10));
+    setReviewFormExpectation("");
+    setReviewFormResult("");
+    setReviewFormReason("");
+    setReviewFormActionPlan("");
+    setReviewFormTags("");
+    setReviewDraftDirty(false);
+  }, []);
+
+  const loadFundReviews = useCallback(async (code: string) => {
+    setReviewLoadingByFund((prev) => ({ ...prev, [code]: true }));
+    try {
+      const response = await fetch(`/api/v1/funds/${code}/reviews`, { cache: "no-store" });
+      const payload = (await response.json()) as ReviewListResponse | ApiErrorResponse;
+      if (!response.ok) {
+        throw new Error((payload as ApiErrorResponse).error ?? "加载复盘失败");
+      }
+      const notes = (payload as ReviewListResponse).notes ?? [];
+      setReviewNotesByFund((prev) => ({ ...prev, [code]: notes }));
+    } catch (error) {
+      const message = classifyFetchFailure(error) || "加载复盘失败";
+      setErrorMessage(message);
+      showToast("error", message);
+    } finally {
+      setReviewLoadingByFund((prev) => ({ ...prev, [code]: false }));
+    }
+  }, [showToast]);
+
+  const onOpenReviewEditor = useCallback(
+    (fund: FundCardData, trigger: HTMLButtonElement) => {
+      lastFocusRef.current = trigger;
+      setEditingReviewFundCode(fund.code);
+      const preferredId = reviewSelectedIdByFund[fund.code] ?? fund.latestReview?.id ?? null;
+      const cachedNotes = reviewNotesByFund[fund.code] ?? [];
+      const preferredNote = preferredId ? cachedNotes.find((note) => note.id === preferredId) : null;
+      setReviewSelectedIdByFund((prev) => ({ ...prev, [fund.code]: preferredId }));
+      setReviewListQueryByFund((prev) => ({ ...prev, [fund.code]: prev[fund.code] ?? "" }));
+      setReviewMobilePane(window.innerWidth <= 900 ? "list" : "editor");
+      resetReviewForm(preferredNote ?? fund.latestReview);
+      void loadFundReviews(fund.code);
+    },
+    [loadFundReviews, resetReviewForm, reviewNotesByFund, reviewSelectedIdByFund]
+  );
+
+  const loadChecklist = useCallback(async (code: string, date = getTodayShanghaiDateString()) => {
+    setChecklistLoadingByFund((prev) => ({ ...prev, [code]: true }));
+    try {
+      const response = await fetch(`/api/v1/funds/${code}/checklist?date=${date}`, { cache: "no-store" });
+      const payload = (await response.json()) as ChecklistResponse | ApiErrorResponse;
+      if (!response.ok) {
+        throw new Error((payload as ApiErrorResponse).error ?? "加载执行清单失败");
+      }
+      setChecklistByFund((prev) => ({ ...prev, [code]: (payload as ChecklistResponse).items ?? [] }));
+    } catch (error) {
+      const message = classifyFetchFailure(error) || "加载执行清单失败";
+      setErrorMessage(message);
+      showToast("error", message);
+    } finally {
+      setChecklistLoadingByFund((prev) => ({ ...prev, [code]: false }));
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    if (!focusedCode) {
+      return;
+    }
+    void loadChecklist(focusedCode);
+  }, [focusedCode, loadChecklist]);
+
+  useEffect(() => {
+    setRealtimeNoteInput("");
+  }, [focusedCode]);
 
   const onSavePosition = useCallback(async () => {
     const code = editingPositionFundCode;
@@ -1433,35 +2032,288 @@ export default function Dashboard() {
     }
   }, [editingGroupFundCode, fetchFunds, groupEditSelection, showToast]);
 
+  const onCreateRealtimeNote = useCallback(async () => {
+    const code = focusedCode;
+    if (!code) {
+      return;
+    }
+    const content = realtimeNoteInput.trim();
+    if (!content) {
+      showToast("error", "请输入笔记内容");
+      return;
+    }
+
+    setChecklistSavingByFund((prev) => ({ ...prev, [code]: true }));
+    const payload = {
+      tradeDate: getTodayShanghaiDateString(),
+      triggerCondition: content,
+      actionPlan: "来源：盘中实时记录",
+      invalidCondition: "手动标记失效",
+      reviewNote: "",
+      status: "todo",
+      priority: "medium" as DecisionChecklistPriority
+    };
+    try {
+      const response = await fetch(`/api/v1/funds/${code}/checklist`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const result = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(result.error ?? "记录笔记失败");
+      }
+      setRealtimeNoteInput("");
+      showToast("success", "笔记已记录");
+      await loadChecklist(code);
+      await fetchFunds();
+    } catch (error) {
+      const message = classifyFetchFailure(error) || "记录笔记失败";
+      setErrorMessage(message);
+      showToast("error", message);
+    } finally {
+      setChecklistSavingByFund((prev) => ({ ...prev, [code]: false }));
+    }
+  }, [fetchFunds, focusedCode, loadChecklist, realtimeNoteInput, showToast]);
+
+  const onDeleteChecklistItem = useCallback(
+    async (itemId: string) => {
+      if (!focusedCode) {
+        return;
+      }
+      setChecklistSavingByFund((prev) => ({ ...prev, [focusedCode]: true }));
+      try {
+        const response = await fetch(`/api/v1/funds/${focusedCode}/checklist/${itemId}`, { method: "DELETE" });
+        const payload = (await response.json()) as { error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error ?? "删除执行项失败");
+        }
+        await loadChecklist(focusedCode);
+        await fetchFunds();
+        showToast("info", "笔记已删除");
+      } catch (error) {
+        const message = classifyFetchFailure(error) || "删除笔记失败";
+        setErrorMessage(message);
+        showToast("error", message);
+      } finally {
+        setChecklistSavingByFund((prev) => ({ ...prev, [focusedCode]: false }));
+      }
+    },
+    [fetchFunds, focusedCode, loadChecklist, showToast]
+  );
+
+  const onOpenBatchGroup = useCallback((trigger: HTMLButtonElement) => {
+    if (selectedCodes.length === 0) {
+      showToast("info", "请先选择至少一只基金");
+      return;
+    }
+    lastFocusRef.current = trigger;
+    setBatchGroupSelection([]);
+    setIsBatchGroupOpen(true);
+  }, [selectedCodes.length, showToast]);
+
+  const onApplyBatchGroups = useCallback(async () => {
+    if (selectedCodes.length === 0) {
+      return;
+    }
+    setBatchActionLoading("applyGroup");
+    try {
+      const response = await fetch("/api/v1/funds/batch/groups", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ codes: selectedCodes, groupIds: batchGroupSelection })
+      });
+      const payload = (await response.json()) as { error?: string; updatedCount?: number };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "批量分组失败");
+      }
+      setIsBatchGroupOpen(false);
+      showToast("success", `批量分组已应用（${payload.updatedCount ?? selectedCodes.length} 只）`);
+      await fetchFunds();
+      onCancelSelect();
+    } catch (error) {
+      const message = classifyFetchFailure(error) || "批量分组失败";
+      setErrorMessage(message);
+      showToast("error", message);
+    } finally {
+      setBatchActionLoading("idle");
+    }
+  }, [batchGroupSelection, fetchFunds, onCancelSelect, selectedCodes, showToast]);
+
+  const onConfirmBatchDelete = useCallback(async () => {
+    if (selectedCodes.length === 0) {
+      return;
+    }
+    setBatchActionLoading("delete");
+    try {
+      const response = await fetch("/api/v1/funds/batch", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ codes: selectedCodes })
+      });
+      const payload = (await response.json()) as { error?: string; deletedCount?: number };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "批量删除失败");
+      }
+      setIsBatchDeleteOpen(false);
+      showToast("success", `已删除 ${payload.deletedCount ?? selectedCodes.length} 只基金`);
+      await fetchFunds();
+      onCancelSelect();
+    } catch (error) {
+      const message = classifyFetchFailure(error) || "批量删除失败";
+      setErrorMessage(message);
+      showToast("error", message);
+    } finally {
+      setBatchActionLoading("idle");
+    }
+  }, [fetchFunds, onCancelSelect, selectedCodes, showToast]);
+
+  const onSaveReview = useCallback(async () => {
+    const code = editingReviewFundCode;
+    if (!code) {
+      return;
+    }
+    if (
+      !reviewFormTitle.trim() ||
+      !reviewFormDate ||
+      !reviewFormExpectation.trim() ||
+      !reviewFormResult.trim() ||
+      !reviewFormReason.trim() ||
+      !reviewFormActionPlan.trim()
+    ) {
+      showToast("error", "请完整填写复盘模板字段");
+      return;
+    }
+
+    setReviewSavingByFund((prev) => ({ ...prev, [code]: true }));
+    const payload = {
+      title: reviewFormTitle.trim(),
+      reviewDate: reviewFormDate,
+      expectation: reviewFormExpectation.trim(),
+      result: reviewFormResult.trim(),
+      reason: reviewFormReason.trim(),
+      actionPlan: reviewFormActionPlan.trim(),
+      tags: parseTagInput(reviewFormTags).slice(0, 10)
+    };
+    try {
+      const response = await fetch(
+        editingReviewId ? `/api/v1/funds/${code}/reviews/${editingReviewId}` : `/api/v1/funds/${code}/reviews`,
+        {
+          method: editingReviewId ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }
+      );
+      const result = (await response.json()) as ReviewResponse | ApiErrorResponse;
+      if (!response.ok) {
+        throw new Error((result as ApiErrorResponse).error ?? "保存复盘失败");
+      }
+      const savedNote = (result as ReviewResponse).note;
+      showToast("success", editingReviewId ? "复盘已更新" : "复盘已保存");
+      setReviewSelectedIdByFund((prev) => ({ ...prev, [code]: savedNote.id }));
+      resetReviewForm(savedNote);
+      setReviewDraftDirty(false);
+      setReviewMobilePane("editor");
+      await loadFundReviews(code);
+      await fetchFunds();
+    } catch (error) {
+      const message = classifyFetchFailure(error) || "保存复盘失败";
+      setErrorMessage(message);
+      showToast("error", message);
+    } finally {
+      setReviewSavingByFund((prev) => ({ ...prev, [code]: false }));
+    }
+  }, [
+    editingReviewFundCode,
+    editingReviewId,
+    fetchFunds,
+    loadFundReviews,
+    parseTagInput,
+    resetReviewForm,
+    reviewFormActionPlan,
+    reviewFormTitle,
+    reviewFormDate,
+    reviewFormExpectation,
+    reviewFormReason,
+    reviewFormResult,
+    reviewFormTags,
+    showToast
+  ]);
+
+  const onDeleteReview = useCallback(
+    async (id: string) => {
+      const code = editingReviewFundCode;
+      if (!code) {
+        return;
+      }
+      if (!window.confirm("确认删除这条复盘笔记？")) {
+        return;
+      }
+      setReviewSavingByFund((prev) => ({ ...prev, [code]: true }));
+      try {
+        const response = await fetch(`/api/v1/funds/${code}/reviews/${id}`, { method: "DELETE" });
+        const payload = (await response.json()) as { error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error ?? "删除复盘失败");
+        }
+        showToast("info", "复盘已删除");
+        if (editingReviewId === id) {
+          setReviewSelectedIdByFund((prev) => ({ ...prev, [code]: null }));
+          resetReviewForm(null);
+        }
+        setReviewDraftDirty(false);
+        await loadFundReviews(code);
+        await fetchFunds();
+      } catch (error) {
+        const message = classifyFetchFailure(error) || "删除复盘失败";
+        setErrorMessage(message);
+        showToast("error", message);
+      } finally {
+        setReviewSavingByFund((prev) => ({ ...prev, [code]: false }));
+      }
+    },
+    [editingReviewFundCode, editingReviewId, fetchFunds, loadFundReviews, resetReviewForm, showToast]
+  );
+
+  const onSelectReviewNote = useCallback(
+    (note: FundReviewNote) => {
+      if (!confirmDiscardReviewDraft()) {
+        return;
+      }
+      if (!editingReviewFundCode) {
+        return;
+      }
+      setReviewSelectedIdByFund((prev) => ({ ...prev, [editingReviewFundCode]: note.id }));
+      resetReviewForm(note);
+      setReviewMobilePane("editor");
+    },
+    [confirmDiscardReviewDraft, editingReviewFundCode, resetReviewForm]
+  );
+
+  const onStartNewReview = useCallback(() => {
+    if (!confirmDiscardReviewDraft()) {
+      return;
+    }
+    if (!editingReviewFundCode) {
+      return;
+    }
+    setReviewSelectedIdByFund((prev) => ({ ...prev, [editingReviewFundCode]: null }));
+    resetReviewForm(null);
+    setReviewMobilePane("editor");
+  }, [confirmDiscardReviewDraft, editingReviewFundCode, resetReviewForm]);
+
   const activeGroupName = useMemo(() => {
     const tab = groupTabs.find((item) => item.id === groupFilter);
     return tab?.name ?? "全部";
   }, [groupFilter, groupTabs]);
 
-  const renderCards = useMemo(() => {
-    if (loadingState === "loading" && funds.length === 0) {
-      return (
-        <>
-          <LoadingExample />
-          <LoadingExample />
-          <LoadingExample />
-        </>
-      );
-    }
+  const focusedFund = useMemo(
+    () => funds.find((fund) => fund.code === focusedCode) ?? null,
+    [focusedCode, funds]
+  );
 
-    if (loadingState === "empty" && funds.length === 0) {
-      return <EmptyExample />;
-    }
-
-    if (loadingState === "noResult" && funds.length === 0) {
-      return <NoResultExample onClear={onClearSearch} groupFilter={groupFilter} activeGroupName={activeGroupName} />;
-    }
-
-    if (loadingState === "error" && funds.length === 0) {
-      return <ErrorExample onRetry={() => void fetchFunds({ showLoading: true })} />;
-    }
-
-    return funds.map((fund) => {
+  const renderFundCard = useCallback(
+    (fund: FundCardData) => {
       const activeRange = historyRangeByFund[fund.code] ?? DEFAULT_HISTORY_RANGE;
       const panelData = historyCacheByFund[fund.code]?.[activeRange];
       return (
@@ -1477,35 +2329,73 @@ export default function Dashboard() {
           historyError={historyErrorByFund[fund.code]}
           maskAmounts={maskAmounts}
           positionSaving={positionSavingByFund[fund.code]}
+          compact
+          isSelecting={isSelecting}
+          isSelected={selectedCodes.includes(fund.code)}
+          focused={focusedCode === fund.code}
           onDelete={onOpenDeleteModal}
+          onToggleSelect={onToggleSelectFund}
+          onFocus={setFocusedCode}
           onOpenPositionEditor={onOpenPositionEditor}
           onOpenGroupEditor={onOpenGroupEditor}
+          onOpenReviewEditor={onOpenReviewEditor}
           onToggleHistory={onToggleHistory}
           onChangeHistoryRange={onChangeHistoryRange}
           onRetryHistory={onRetryHistory}
         />
       );
-    });
+    },
+    [
+      expandedFundCode,
+      focusedCode,
+      historyCacheByFund,
+      historyErrorByFund,
+      historyRangeByFund,
+      historyStateByFund,
+      isSelecting,
+      maskAmounts,
+      onChangeHistoryRange,
+      onOpenDeleteModal,
+      onOpenGroupEditor,
+      onOpenPositionEditor,
+      onOpenReviewEditor,
+      onRetryHistory,
+      onToggleHistory,
+      onToggleSelectFund,
+      positionSavingByFund,
+      selectedCodes
+    ]
+  );
+
+  const renderCards = useMemo(() => {
+    if (loadingState === "loading" && funds.length === 0) {
+      return (
+        <>
+          <LoadingExample />
+          <LoadingExample />
+          <LoadingExample />
+        </>
+      );
+    }
+    if (loadingState === "empty" && funds.length === 0) {
+      return <EmptyExample />;
+    }
+    if (loadingState === "noResult" && funds.length === 0) {
+      return <NoResultExample onClear={onClearSearch} groupFilter={groupFilter} activeGroupName={activeGroupName} />;
+    }
+    if (loadingState === "error" && funds.length === 0) {
+      return <ErrorExample onRetry={() => void fetchFunds({ showLoading: true })} />;
+    }
+
+    return funds.map((fund) => renderFundCard(fund));
   }, [
     activeGroupName,
-    expandedFundCode,
     fetchFunds,
     funds,
     groupFilter,
-    historyCacheByFund,
-    historyErrorByFund,
-    historyRangeByFund,
-    historyStateByFund,
     loadingState,
-    maskAmounts,
-    onChangeHistoryRange,
     onClearSearch,
-    onOpenDeleteModal,
-    onOpenGroupEditor,
-    onOpenPositionEditor,
-    onRetryHistory,
-    onToggleHistory,
-    positionSavingByFund
+    renderFundCard
   ]);
 
   const editingFund = useMemo(
@@ -1516,6 +2406,128 @@ export default function Dashboard() {
   const groupEditingFund = useMemo(
     () => funds.find((fund) => fund.code === editingGroupFundCode) ?? null,
     [editingGroupFundCode, funds]
+  );
+
+  const reviewEditingFund = useMemo(
+    () => funds.find((fund) => fund.code === editingReviewFundCode) ?? null,
+    [editingReviewFundCode, funds]
+  );
+
+  const activeReviewNotes = useMemo(
+    () => (editingReviewFundCode ? reviewNotesByFund[editingReviewFundCode] ?? [] : []),
+    [editingReviewFundCode, reviewNotesByFund]
+  );
+  const selectedReviewNote = useMemo(
+    () => activeReviewNotes.find((note) => note.id === editingReviewId) ?? null,
+    [activeReviewNotes, editingReviewId]
+  );
+
+  const reviewListQuery = editingReviewFundCode ? reviewListQueryByFund[editingReviewFundCode] ?? "" : "";
+
+  const filteredReviewNotes = useMemo(() => {
+    const keyword = reviewListQuery.trim().toLowerCase();
+    if (!keyword) {
+      return activeReviewNotes;
+    }
+    return activeReviewNotes.filter((note) => note.title.toLowerCase().includes(keyword));
+  }, [activeReviewNotes, reviewListQuery]);
+
+  const groupedReviewNotes = useMemo(() => {
+    const groups: Array<{ date: string; notes: FundReviewNote[] }> = [];
+    for (const note of filteredReviewNotes) {
+      const existing = groups.find((group) => group.date === note.reviewDate);
+      if (existing) {
+        existing.notes.push(note);
+      } else {
+        groups.push({ date: note.reviewDate, notes: [note] });
+      }
+    }
+    return groups;
+  }, [filteredReviewNotes]);
+
+  useEffect(() => {
+    if (!editingReviewFundCode) {
+      return;
+    }
+    const selectedId = reviewSelectedIdByFund[editingReviewFundCode];
+    if (selectedId === null) {
+      if (editingReviewId !== null) {
+        resetReviewForm(null);
+      }
+      return;
+    }
+
+    const preferredId = selectedId ?? activeReviewNotes[0]?.id ?? null;
+    const found = preferredId ? activeReviewNotes.find((note) => note.id === preferredId) ?? null : null;
+    if (!found) {
+      resetReviewForm(null);
+      return;
+    }
+
+    setEditingReviewId(found.id);
+    if (editingReviewId !== found.id) {
+      resetReviewForm(found);
+    }
+  }, [activeReviewNotes, editingReviewFundCode, editingReviewId, resetReviewForm, reviewSelectedIdByFund]);
+
+  useEffect(() => {
+    if (!editingReviewFundCode) {
+      return;
+    }
+
+    const onReviewKeydown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void onSaveReview();
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName ?? "";
+      const isEditable =
+        target?.isContentEditable || tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
+      if (isEditable) {
+        return;
+      }
+
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+        return;
+      }
+
+      if (filteredReviewNotes.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      const currentId = reviewSelectedIdByFund[editingReviewFundCode] ?? editingReviewId;
+      const currentIndex = currentId ? filteredReviewNotes.findIndex((note) => note.id === currentId) : 0;
+      const baseIndex = currentIndex < 0 ? 0 : currentIndex;
+      const nextIndex =
+        event.key === "ArrowDown"
+          ? Math.min(filteredReviewNotes.length - 1, baseIndex + 1)
+          : Math.max(0, baseIndex - 1);
+      const nextNote = filteredReviewNotes[nextIndex];
+      if (nextNote) {
+        onSelectReviewNote(nextNote);
+      }
+    };
+
+    document.addEventListener("keydown", onReviewKeydown);
+    return () => {
+      document.removeEventListener("keydown", onReviewKeydown);
+    };
+  }, [
+    editingReviewFundCode,
+    editingReviewId,
+    filteredReviewNotes,
+    onSaveReview,
+    onSelectReviewNote,
+    reviewSelectedIdByFund
+  ]);
+
+  const focusedChecklistItems = useMemo(
+    () => (focusedCode ? checklistByFund[focusedCode] ?? [] : []),
+    [checklistByFund, focusedCode]
   );
 
   return (
@@ -1557,6 +2569,13 @@ export default function Dashboard() {
 
           <div className="actions-row actions-row-desktop">
             <button
+              type="button"
+              className={cn("ghost-btn selection-toggle-btn", isSelecting && "active")}
+              onClick={isSelecting ? onCancelSelect : onStartSelect}
+            >
+              {isSelecting ? "退出多选" : "多选"}
+            </button>
+            <button
               className="add-fund-btn"
               type="button"
               onClick={(event) => onOpenAddModal(event.currentTarget)}
@@ -1567,6 +2586,7 @@ export default function Dashboard() {
             <label className="search-input" aria-label="搜索基金">
               <Search size={18} className="text-muted" />
               <input
+                ref={desktopSearchRef}
                 value={queryInput}
                 onChange={(event) => setQueryInput(event.target.value)}
                 onKeyDown={(event) => {
@@ -1584,11 +2604,18 @@ export default function Dashboard() {
             </label>
           </div>
         </header>
-
         <div className="actions-row actions-row-mobile">
+          <button
+            type="button"
+            className={cn("ghost-btn selection-toggle-btn", isSelecting && "active")}
+            onClick={isSelecting ? onCancelSelect : onStartSelect}
+          >
+            {isSelecting ? "退出多选" : "多选"}
+          </button>
           <label className="search-input" aria-label="搜索基金">
             <Search size={16} className="text-muted" />
             <input
+              ref={mobileSearchRef}
               value={queryInput}
               onChange={(event) => setQueryInput(event.target.value)}
               onKeyDown={(event) => {
@@ -1606,27 +2633,6 @@ export default function Dashboard() {
           </label>
         </div>
 
-        <GroupTabBar
-          tabs={groupTabs}
-          activeGroupId={groupFilter}
-          onChange={setGroupFilter}
-          onOpenManage={onOpenGroupManage}
-        />
-
-        <section className="sort-segment" aria-label="排序控件">
-          {sortOptions.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={cn("sort-btn", sortBy === option.value && "active")}
-              onClick={() => setSortBy(option.value)}
-            >
-              <span>{option.label}</span>
-              {option.icon}
-            </button>
-          ))}
-        </section>
-
         {errorMessage ? (
           <div className="inline-error" role="alert" aria-live="assertive">
             <AlertTriangle size={14} />
@@ -1634,8 +2640,142 @@ export default function Dashboard() {
           </div>
         ) : null}
 
-        <section className="cards-grid">{renderCards}</section>
+        <section className="workspace-shell desktop-only">
+          <div className="workspace-grid workspace-grid-two">
+            <section className="workspace-main-column">
+              <GroupTabBar
+                tabs={groupTabs}
+                activeGroupId={groupFilter}
+                onChange={setGroupFilter}
+                onOpenManage={onOpenGroupManage}
+              />
+              <GroupPerformanceBar summary={groupPerformance} />
+              <section className="sort-segment workspace-sort-segment" aria-label="排序控件">
+                {sortOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={cn("sort-btn", sortBy === option.value && "active")}
+                    onClick={() => setSortBy(option.value)}
+                  >
+                    <span>{option.label}</span>
+                    {option.icon}
+                  </button>
+                ))}
+              </section>
+              <section className="cards-grid cards-grid-mosaic">{renderCards}</section>
+            </section>
+            <aside className="workspace-right">
+              <RealtimeNotesSidebar
+                key={`desktop-${focusedCode ?? "empty"}`}
+                focusedFund={focusedFund}
+                items={focusedChecklistItems}
+                loading={Boolean(focusedCode ? checklistLoadingByFund[focusedCode] : false)}
+                saving={Boolean(focusedCode ? checklistSavingByFund[focusedCode] : false)}
+                noteInput={realtimeNoteInput}
+                noteInputRef={noteInputRef}
+                onNoteInputChange={setRealtimeNoteInput}
+                onAdd={() => void onCreateRealtimeNote()}
+                onDelete={(itemId) => void onDeleteChecklistItem(itemId)}
+                onOpenReviewEditor={onOpenReviewEditor}
+              />
+            </aside>
+          </div>
+        </section>
+
+        <section className="mobile-workspace mobile-only">
+          <section className="mobile-workspace-content">
+            {mobileWorkspaceTab === "intraday" ? (
+              <>
+                <GroupTabBar
+                  tabs={groupTabs}
+                  activeGroupId={groupFilter}
+                  onChange={setGroupFilter}
+                  onOpenManage={onOpenGroupManage}
+                />
+                <GroupPerformanceBar summary={groupPerformance} />
+                <section className="sort-segment" aria-label="排序控件">
+                  {sortOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={cn("sort-btn", sortBy === option.value && "active")}
+                      onClick={() => setSortBy(option.value)}
+                    >
+                      <span>{option.label}</span>
+                      {option.icon}
+                    </button>
+                  ))}
+                </section>
+                <section className="cards-grid cards-grid-mosaic mobile-mosaic">{renderCards}</section>
+              </>
+            ) : (
+              <RealtimeNotesSidebar
+                key={`mobile-${focusedCode ?? "empty"}`}
+                focusedFund={focusedFund}
+                items={focusedChecklistItems}
+                loading={Boolean(focusedCode ? checklistLoadingByFund[focusedCode] : false)}
+                saving={Boolean(focusedCode ? checklistSavingByFund[focusedCode] : false)}
+                noteInput={realtimeNoteInput}
+                noteInputRef={noteInputRef}
+                onNoteInputChange={setRealtimeNoteInput}
+                onAdd={() => void onCreateRealtimeNote()}
+                onDelete={(itemId) => void onDeleteChecklistItem(itemId)}
+                onOpenReviewEditor={onOpenReviewEditor}
+              />
+            )}
+          </section>
+          <nav className="workspace-tabs" aria-label="移动工作台标签">
+            <button
+              type="button"
+              className={cn("workspace-tab-btn", mobileWorkspaceTab === "intraday" && "active")}
+              onClick={() => setMobileWorkspaceTab("intraday")}
+            >
+              主栏
+            </button>
+            <button
+              type="button"
+              className={cn("workspace-tab-btn", mobileWorkspaceTab === "review" && "active")}
+              onClick={() => setMobileWorkspaceTab("review")}
+            >
+              笔记
+            </button>
+          </nav>
+        </section>
       </section>
+
+      {isSelecting ? (
+        <section className="batch-floating-bar" aria-live="polite">
+          <p>已选择 {selectedCodes.length} 只基金</p>
+          <div className="batch-floating-actions">
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={(event) => onOpenBatchGroup(event.currentTarget)}
+              disabled={batchActionLoading !== "idle" || selectedCodes.length === 0}
+            >
+              批量分组
+            </button>
+            <button
+              type="button"
+              className="danger-btn"
+              onClick={(event) => {
+                if (selectedCodes.length === 0) {
+                  return;
+                }
+                lastFocusRef.current = event.currentTarget;
+                setIsBatchDeleteOpen(true);
+              }}
+              disabled={batchActionLoading !== "idle" || selectedCodes.length === 0}
+            >
+              批量删除
+            </button>
+            <button type="button" className="ghost-btn" onClick={onCancelSelect} disabled={batchActionLoading !== "idle"}>
+              取消
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {isAddOpen ? (
         <div
@@ -1900,6 +3040,71 @@ export default function Dashboard() {
         </div>
       ) : null}
 
+      {isBatchGroupOpen ? (
+        <div
+          className="modal-mask"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="batch-group-title"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsBatchGroupOpen(false);
+            }
+          }}
+        >
+          <section className="modal-card" ref={batchGroupModalRef}>
+            <h3 id="batch-group-title">批量设置分组</h3>
+            <p className="modal-sub">将覆盖 {selectedCodes.length} 只基金的分组归属</p>
+            <div className="group-select-grid">
+              {groups.map((group) => {
+                const selected = batchGroupSelection.includes(group.id);
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    className={cn("group-select-option", selected && "selected")}
+                    onClick={() => {
+                      setBatchGroupSelection((prev) =>
+                        prev.includes(group.id) ? prev.filter((item) => item !== group.id) : [...prev, group.id]
+                      );
+                    }}
+                  >
+                    <span>{group.name}</span>
+                    {selected ? <Check size={13} /> : null}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                className={cn("group-select-option", batchGroupSelection.length === 0 && "selected")}
+                onClick={() => setBatchGroupSelection([])}
+              >
+                <span>全部设为未分组</span>
+                {batchGroupSelection.length === 0 ? <Check size={13} /> : null}
+              </button>
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => setIsBatchGroupOpen(false)}
+                disabled={batchActionLoading !== "idle"}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="add-fund-btn compact"
+                onClick={() => void onApplyBatchGroups()}
+                disabled={batchActionLoading !== "idle"}
+              >
+                {batchActionLoading === "applyGroup" ? "保存中..." : "确认应用"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {editingPositionFundCode && editingFund ? (
         <div
           className="modal-mask"
@@ -1962,6 +3167,260 @@ export default function Dashboard() {
                   {positionSavingByFund[editingPositionFundCode] ? "保存中..." : "保存"}
                 </button>
               </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {editingReviewFundCode && reviewEditingFund ? (
+        <div
+          className="modal-mask"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="review-edit-title"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeReviewWorkspace();
+            }
+          }}
+        >
+          <section
+            className={cn(
+              "modal-card review-workspace-modal",
+              reviewMobilePane === "list" ? "review-mobile-list" : "review-mobile-editor"
+            )}
+            ref={reviewModalRef}
+          >
+            <header className="review-workspace-header">
+              <div>
+                <h3 id="review-edit-title">{reviewEditingFund.code} {reviewEditingFund.name} · 历史复盘笔记</h3>
+                <p className="modal-sub">按日期分组，默认近到远</p>
+              </div>
+              <div className="review-workspace-header-actions">
+                {reviewDraftDirty ? <span className="review-dirty-chip">草稿未保存</span> : null}
+                <button type="button" className="ghost-btn icon-btn" onClick={closeReviewWorkspace} aria-label="关闭复盘工作台">
+                  <X size={14} />
+                </button>
+              </div>
+            </header>
+
+            <div className="review-workspace-body">
+              <aside className="review-list-pane">
+                <div className="review-list-toolbar">
+                  <label className="review-list-search" aria-label="搜索复盘标题">
+                    <Search size={14} className="text-muted" />
+                    <input
+                      className="modal-input"
+                      value={reviewListQuery}
+                      onChange={(event) => {
+                        setReviewListQueryByFund((prev) => ({
+                          ...prev,
+                          [editingReviewFundCode]: event.target.value
+                        }));
+                      }}
+                      placeholder="搜索标题"
+                    />
+                  </label>
+                  <button type="button" className="add-fund-btn compact" onClick={onStartNewReview}>
+                    + 新建笔记
+                  </button>
+                </div>
+                <div className="review-date-groups" role="listbox" aria-label="历史复盘列表">
+                  {reviewLoadingByFund[editingReviewFundCode] ? <p className="modal-hint">加载中...</p> : null}
+                  {!reviewLoadingByFund[editingReviewFundCode] && filteredReviewNotes.length === 0 ? (
+                    <p className="modal-hint">暂无笔记，点击右上角新建</p>
+                  ) : null}
+                  {groupedReviewNotes.map((group) => (
+                    <section key={group.date} className="review-date-group">
+                      <p className="review-date-title">{group.date}</p>
+                      {group.notes.map((note) => (
+                        <button
+                          key={note.id}
+                          type="button"
+                          className={cn("review-title-item", editingReviewId === note.id && "active")}
+                          onClick={() => onSelectReviewNote(note)}
+                        >
+                          {note.title}
+                        </button>
+                      ))}
+                    </section>
+                  ))}
+                </div>
+              </aside>
+
+              <section className="review-editor-pane">
+                <div className="review-editor-head">
+                  <div>
+                    <p className="review-editor-title">{editingReviewId ? "选中笔记详情" : "新建笔记"}</p>
+                    <p className="review-editor-meta">Cmd/Ctrl+S 可快速保存</p>
+                  </div>
+                  <div className="review-editor-head-actions">
+                    <button type="button" className="ghost-btn review-mobile-back-btn" onClick={() => setReviewMobilePane("list")}>
+                      返回列表
+                    </button>
+                    <span className="review-editor-state-chip">{reviewDraftDirty ? "草稿中" : "已保存"}</span>
+                  </div>
+                </div>
+                <div className="review-editor-form">
+                  <label className="modal-input-wrap">
+                    <span>标题</span>
+                    <input
+                      className="modal-input"
+                      value={reviewFormTitle}
+                      maxLength={60}
+                      onChange={(event) => {
+                        setReviewFormTitle(event.target.value);
+                        setReviewDraftDirty(true);
+                      }}
+                      placeholder="例如：半导体午后回撤复盘"
+                    />
+                  </label>
+                  <label className="modal-input-wrap">
+                    <span>日期</span>
+                    <input
+                      className="modal-input"
+                      type="date"
+                      value={reviewFormDate}
+                      onChange={(event) => {
+                        setReviewFormDate(event.target.value);
+                        setReviewDraftDirty(true);
+                      }}
+                    />
+                  </label>
+
+                  <div className="review-template-block">
+                    <label className="modal-input-wrap">
+                      <span>预期</span>
+                      <textarea
+                        className="modal-textarea review-textarea-sm"
+                        value={reviewFormExpectation}
+                        onChange={(event) => {
+                          setReviewFormExpectation(event.target.value);
+                          setReviewDraftDirty(true);
+                        }}
+                        placeholder="记录你的预期判断"
+                      />
+                    </label>
+                    <label className="modal-input-wrap">
+                      <span>结果</span>
+                      <textarea
+                        className="modal-textarea review-textarea-sm"
+                        value={reviewFormResult}
+                        onChange={(event) => {
+                          setReviewFormResult(event.target.value);
+                          setReviewDraftDirty(true);
+                        }}
+                        placeholder="记录实际盘中表现"
+                      />
+                    </label>
+                    <label className="modal-input-wrap">
+                      <span>原因</span>
+                      <textarea
+                        className="modal-textarea review-textarea-sm"
+                        value={reviewFormReason}
+                        onChange={(event) => {
+                          setReviewFormReason(event.target.value);
+                          setReviewDraftDirty(true);
+                        }}
+                        placeholder="分析关键原因"
+                      />
+                    </label>
+                    <label className="modal-input-wrap">
+                      <span>改进动作</span>
+                      <textarea
+                        className="modal-textarea review-textarea-sm"
+                        value={reviewFormActionPlan}
+                        onChange={(event) => {
+                          setReviewFormActionPlan(event.target.value);
+                          setReviewDraftDirty(true);
+                        }}
+                        placeholder="下一步动作"
+                      />
+                    </label>
+                    <label className="modal-input-wrap">
+                      <span>标签（逗号分隔）</span>
+                      <input
+                        className="modal-input"
+                        value={reviewFormTags}
+                        onChange={(event) => {
+                          setReviewFormTags(event.target.value);
+                          setReviewDraftDirty(true);
+                        }}
+                        placeholder="如：半导体,回撤,止盈"
+                      />
+                    </label>
+                  </div>
+
+                </div>
+
+                <div className="modal-actions review-editor-footer">
+                  <span className="review-editor-footer-note">该基金历史笔记 · 默认近到远</span>
+                  <div className="review-editor-footer-actions">
+                    {editingReviewId ? (
+                      <button
+                        type="button"
+                        className="danger-btn"
+                        onClick={() => void onDeleteReview(editingReviewId)}
+                        disabled={Boolean(reviewSavingByFund[editingReviewFundCode])}
+                      >
+                        删除
+                      </button>
+                    ) : null}
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => {
+                      if (!confirmDiscardReviewDraft()) {
+                        return;
+                      }
+                      resetReviewForm(selectedReviewNote);
+                    }}
+                  >
+                    取消修改
+                  </button>
+                  <button
+                    type="button"
+                    className="add-fund-btn compact"
+                    onClick={() => void onSaveReview()}
+                    disabled={Boolean(reviewSavingByFund[editingReviewFundCode])}
+                  >
+                    {reviewSavingByFund[editingReviewFundCode] ? "保存中..." : editingReviewId ? "更新笔记" : "保存笔记"}
+                  </button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isBatchDeleteOpen ? (
+        <div
+          className="modal-mask"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-batch-title"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsBatchDeleteOpen(false);
+            }
+          }}
+        >
+          <section className="modal-card delete-card" ref={batchDeleteModalRef}>
+            <h3 id="delete-batch-title">确认批量删除?</h3>
+            <p>将删除已选择的 {selectedCodes.length} 只基金，可稍后重新添加。</p>
+            <div className="modal-actions">
+              <button type="button" className="ghost-btn" onClick={() => setIsBatchDeleteOpen(false)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger-btn"
+                onClick={() => void onConfirmBatchDelete()}
+                disabled={batchActionLoading !== "idle"}
+              >
+                {batchActionLoading === "delete" ? "删除中..." : "确认删除"}
+              </button>
             </div>
           </section>
         </div>
