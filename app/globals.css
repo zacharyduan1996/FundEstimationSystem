@@ -918,6 +918,12 @@ input {
   border-color: rgba(143, 204, 255, 0.5);
 }
 
+.quick-action-btn.active {
+  color: var(--text-primary);
+  border-color: rgba(143, 204, 255, 0.45);
+  background: rgba(27, 46, 73, 0.9);
+}
+
 .card-info {
   display: flex;
   flex-direction: column;
@@ -1333,6 +1339,12 @@ input {
   flex-direction: column;
   gap: 10px;
   min-height: 352px;
+}
+
+.history-panel-compact {
+  min-height: 248px;
+  padding: 9px;
+  gap: 8px;
 }
 
 .history-head {

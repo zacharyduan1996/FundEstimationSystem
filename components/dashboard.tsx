@@ -707,6 +707,20 @@ function FundCard({
         >
           复盘
         </button>
+        {compact ? (
+          <button
+            type="button"
+            className={cn("quick-action-btn", expanded && "active")}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleHistory(fund.code);
+            }}
+            aria-expanded={expanded}
+            aria-controls={`history-panel-${fund.code}`}
+          >
+            历史
+          </button>
+        ) : null}
       </div>
 
       {!compact && metrics.hasPosition ? (
@@ -847,8 +861,11 @@ function FundCard({
       </button>
       ) : null}
 
-      {!compact && expanded ? (
-        <section id={`history-panel-${fund.code}`} className="history-panel">
+      {expanded ? (
+        <section
+          id={`history-panel-${fund.code}`}
+          className={cn("history-panel", compact && "history-panel-compact")}
+        >
           <div className="history-head">
             <div className="history-title-wrap">
               <ChartNoAxesCombined size={14} className="text-accent" />
