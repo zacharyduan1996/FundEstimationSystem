@@ -4,6 +4,8 @@ node_modules
 coverage
 .DS_Store
 .codex
+*.tsbuildinfo
+.eslintcache
 
 *.log
 *.pid

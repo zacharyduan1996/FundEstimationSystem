@@ -1,12 +1,19 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import dayjs from "dayjs";
 import { detectFundInstrumentType } from "./fund-kind";
 import { getTodayShanghai } from "./time";
 import { isStale } from "./trading";
 import type {
+  DecisionChecklistItem,
+  DecisionChecklistPriority,
+  DecisionChecklistStatus,
+  DecisionPanelSummary,
+  FundReviewNote,
   FundGroup,
   FundGroupMembership,
   FundCardData,
+  GroupPerformanceSummary,
   GroupFilter,
   GroupTabStat,
   HistoryPoint,
@@ -89,6 +96,46 @@ function openDatabase(filePath: string): BetterSqliteDatabase {
 
     CREATE INDEX IF NOT EXISTS idx_group_memberships_group ON fund_group_memberships(group_id, code);
 
+    CREATE TABLE IF NOT EXISTS fund_review_notes (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      review_date TEXT NOT NULL,
+      expectation TEXT NOT NULL,
+      result TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      action_plan TEXT NOT NULL,
+      record_kind TEXT NOT NULL DEFAULT 'legacy',
+      source_checklist_item_id TEXT,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (code) REFERENCES watchlist(code) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_review_code_date
+      ON fund_review_notes(code, review_date DESC, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS fund_decision_checklist_items (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL,
+      trade_date TEXT NOT NULL,
+      trigger_condition TEXT NOT NULL,
+      action_plan TEXT NOT NULL,
+      invalid_condition TEXT NOT NULL,
+      review_note TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'todo',
+      priority TEXT NOT NULL DEFAULT 'medium',
+      archived_review_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (code) REFERENCES watchlist(code) ON DELETE CASCADE,
+      FOREIGN KEY (archived_review_id) REFERENCES fund_review_notes(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_checklist_code_date
+      ON fund_decision_checklist_items(code, trade_date DESC, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS collector_state (
       id INTEGER PRIMARY KEY CHECK(id = 1),
       last_run_at TEXT,
@@ -115,6 +162,28 @@ function openDatabase(filePath: string): BetterSqliteDatabase {
   if (!hasSource) {
     db.exec("ALTER TABLE intraday_points ADD COLUMN source TEXT NOT NULL DEFAULT 'eastmoney_estimation'");
   }
+
+  const reviewColumns = db.prepare("PRAGMA table_info(fund_review_notes)").all() as Array<{ name: string }>;
+  const hasTitle = reviewColumns.some((column) => column.name === "title");
+  const hasRecordKind = reviewColumns.some((column) => column.name === "record_kind");
+  const hasSourceChecklistItemId = reviewColumns.some((column) => column.name === "source_checklist_item_id");
+  if (!hasTitle) {
+    db.exec("ALTER TABLE fund_review_notes ADD COLUMN title TEXT NOT NULL DEFAULT ''");
+  }
+  if (!hasRecordKind) {
+    db.exec("ALTER TABLE fund_review_notes ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'legacy'");
+  }
+  if (!hasSourceChecklistItemId) {
+    db.exec("ALTER TABLE fund_review_notes ADD COLUMN source_checklist_item_id TEXT");
+  }
+
+  db.prepare(
+    `
+    UPDATE fund_review_notes
+    SET title = substr(COALESCE(NULLIF(TRIM(result), ''), '历史复盘'), 1, 60)
+    WHERE title IS NULL OR TRIM(title) = ''
+    `
+  ).run();
 
   return db;
 }
@@ -179,6 +248,20 @@ export class GroupNotFoundError extends Error {
   constructor() {
     super("分组不存在");
     this.name = "GroupNotFoundError";
+  }
+}
+
+export class ReviewNoteNotFoundError extends Error {
+  constructor() {
+    super("复盘笔记不存在");
+    this.name = "ReviewNoteNotFoundError";
+  }
+}
+
+export class DecisionChecklistNotFoundError extends Error {
+  constructor() {
+    super("执行清单不存在");
+    this.name = "DecisionChecklistNotFoundError";
   }
 }
 
@@ -387,6 +470,82 @@ export function setFundGroupsForCode(code: string, groupIds: string[], db = getD
   return listFundGroupMembershipsForCodes([code], db)[code] ?? [];
 }
 
+export function setFundGroupsForCodes(
+  codes: string[],
+  groupIds: string[],
+  db = getDb()
+): { updatedCount: number } {
+  const dedupedCodes = [...new Set(codes.map((code) => code.trim()).filter((code) => code.length > 0))];
+  if (dedupedCodes.length === 0) {
+    return { updatedCount: 0 };
+  }
+
+  const dedupedGroupIds = [...new Set(groupIds)];
+  dedupedGroupIds.forEach(assertCanUseAsGroupId);
+
+  const codePlaceholders = dedupedCodes.map(() => "?").join(",");
+  const watchlistCountRow = db
+    .prepare(`SELECT COUNT(*) AS count FROM watchlist WHERE code IN (${codePlaceholders})`)
+    .get(...dedupedCodes) as { count: number };
+  if (watchlistCountRow.count !== dedupedCodes.length) {
+    throw new Error("包含不在自选列表中的基金");
+  }
+
+  if (dedupedGroupIds.length > 0) {
+    const groupPlaceholders = dedupedGroupIds.map(() => "?").join(",");
+    const groupCountRow = db
+      .prepare(`SELECT COUNT(*) AS count FROM fund_groups WHERE id IN (${groupPlaceholders})`)
+      .get(...dedupedGroupIds) as { count: number };
+    if (groupCountRow.count !== dedupedGroupIds.length) {
+      throw new GroupNotFoundError();
+    }
+  }
+
+  const tx = db.transaction((targetCodes: string[], targetGroupIds: string[]) => {
+    const now = new Date().toISOString();
+    const deleteStmt = db.prepare("DELETE FROM fund_group_memberships WHERE code = ?");
+    const insertStmt = db.prepare(
+      "INSERT INTO fund_group_memberships (code, group_id, created_at) VALUES (?, ?, ?)"
+    );
+
+    for (const code of targetCodes) {
+      deleteStmt.run(code);
+      for (const groupId of targetGroupIds) {
+        insertStmt.run(code, groupId, now);
+      }
+    }
+  });
+  tx(dedupedCodes, dedupedGroupIds);
+
+  return { updatedCount: dedupedCodes.length };
+}
+
+export function deleteWatchlistItems(codes: string[], db = getDb()): { deletedCount: number; deletedCodes: string[] } {
+  const dedupedCodes = [...new Set(codes.map((code) => code.trim()).filter((code) => code.length > 0))];
+  if (dedupedCodes.length === 0) {
+    return { deletedCount: 0, deletedCodes: [] };
+  }
+
+  const placeholders = dedupedCodes.map(() => "?").join(",");
+  const existingRows = db
+    .prepare(`SELECT code FROM watchlist WHERE code IN (${placeholders})`)
+    .all(...dedupedCodes) as Array<{ code: string }>;
+  const existingCodes = existingRows.map((row) => row.code);
+  if (existingCodes.length === 0) {
+    return { deletedCount: 0, deletedCodes: [] };
+  }
+
+  const tx = db.transaction((targetCodes: string[]) => {
+    const deleteStmt = db.prepare("DELETE FROM watchlist WHERE code = ?");
+    for (const code of targetCodes) {
+      deleteStmt.run(code);
+    }
+  });
+  tx(existingCodes);
+
+  return { deletedCount: existingCodes.length, deletedCodes: existingCodes };
+}
+
 function listFundGroupMembershipsForCodes(
   codes: string[],
   db = getDb()
@@ -538,8 +697,805 @@ export function listGroupTabs(db = getDb()): GroupTabStat[] {
   ];
 }
 
+function resolveGroupMeta(groupFilter: GroupFilter, db = getDb()): { groupId: GroupFilter; groupName: string } {
+  if (!groupFilter || groupFilter === "all") {
+    return { groupId: "all", groupName: "全部" };
+  }
+  if (groupFilter === "ungrouped") {
+    return { groupId: "ungrouped", groupName: "未分组" };
+  }
+  const row = db.prepare("SELECT name FROM fund_groups WHERE id = ?").get(groupFilter) as
+    | { name: string }
+    | undefined;
+  return {
+    groupId: groupFilter,
+    groupName: row?.name ?? "分组"
+  };
+}
+
+function listCodesByGroupFilter(groupFilter: GroupFilter, db = getDb()): string[] {
+  if (!groupFilter || groupFilter === "all") {
+    return (db.prepare("SELECT code FROM watchlist ORDER BY created_at DESC").all() as Array<{ code: string }>).map(
+      (row) => row.code
+    );
+  }
+
+  if (groupFilter === "ungrouped") {
+    return (
+      db
+        .prepare(
+          `
+      SELECT w.code AS code
+      FROM watchlist w
+      WHERE NOT EXISTS (
+        SELECT 1 FROM fund_group_memberships m WHERE m.code = w.code
+      )
+      ORDER BY w.created_at DESC
+      `
+        )
+        .all() as Array<{ code: string }>
+    ).map((row) => row.code);
+  }
+
+  return (
+    db
+      .prepare(
+        `
+      SELECT w.code AS code
+      FROM watchlist w
+      WHERE EXISTS (
+        SELECT 1
+        FROM fund_group_memberships m
+        WHERE m.code = w.code
+          AND m.group_id = ?
+      )
+      ORDER BY w.created_at DESC
+      `
+      )
+      .all(groupFilter) as Array<{ code: string }>
+  ).map((row) => row.code);
+}
+
+function average(values: Array<number | null | undefined>): number | null {
+  const valid = values.filter((value): value is number => value !== null && value !== undefined && Number.isFinite(value));
+  if (valid.length === 0) {
+    return null;
+  }
+  return valid.reduce((sum, current) => sum + current, 0) / valid.length;
+}
+
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+export function getGroupPerformanceSummary(
+  groupFilter: GroupFilter,
+  date = getTodayShanghai(),
+  db = getDb()
+): GroupPerformanceSummary {
+  const meta = resolveGroupMeta(groupFilter, db);
+  const codes = listCodesByGroupFilter(groupFilter, db);
+  const memberCount = codes.length;
+  if (memberCount === 0) {
+    return {
+      groupId: meta.groupId,
+      groupName: meta.groupName,
+      memberCount: 0,
+      todayAvgDeltaPct: null,
+      sevenDayReturnPct: null,
+      updatedAt: null
+    };
+  }
+
+  const latestRows = db
+    .prepare(
+      `
+      SELECT latest.code AS code, latest.delta_percent AS deltaPercent, latest.quote_ts AS quoteTs
+      FROM intraday_points latest
+      INNER JOIN (
+        SELECT code, MAX(quote_ts) AS maxTs
+        FROM intraday_points
+        GROUP BY code
+      ) latest_ts ON latest_ts.code = latest.code AND latest_ts.maxTs = latest.quote_ts
+      WHERE latest.code IN (${codes.map(() => "?").join(",")})
+      `
+    )
+    .all(...codes) as Array<{ code: string; deltaPercent: number | null; quoteTs: string }>;
+
+  const todayAvgDeltaPct = average(latestRows.map((row) => row.deltaPercent));
+
+  const startDate = dayjs(date).subtract(6, "day").format("YYYY-MM-DD");
+  const sevenDayReturns = codes.map((code) => {
+    const points = getHistoryPoints(code, startDate, date, db);
+    if (points.length < 2) {
+      return null;
+    }
+    const startNav = points[0]?.nav;
+    const endNav = points[points.length - 1]?.nav;
+    if (!startNav || !endNav || startNav <= 0) {
+      return null;
+    }
+    return ((endNav - startNav) / startNav) * 100;
+  });
+  const sevenDayReturnPct = average(sevenDayReturns);
+
+  const latestTs = latestRows
+    .map((row) => row.quoteTs)
+    .sort((a, b) => (a > b ? -1 : 1))[0];
+
+  return {
+    groupId: meta.groupId,
+    groupName: meta.groupName,
+    memberCount,
+    todayAvgDeltaPct: todayAvgDeltaPct === null ? null : round2(todayAvgDeltaPct),
+    sevenDayReturnPct: sevenDayReturnPct === null ? null : round2(sevenDayReturnPct),
+    updatedAt: latestTs ?? null
+  };
+}
+
+function parseTagsJson(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
+}
+
+function mapReviewRow(row: {
+  id: string;
+  code: string;
+  title: string;
+  reviewDate: string;
+  expectation: string;
+  result: string;
+  reason: string;
+  actionPlan: string;
+  tagsJson: string;
+  createdAt: string;
+  updatedAt: string;
+}): FundReviewNote {
+  const normalizedTitle = row.title.trim().length > 0 ? row.title.trim() : row.result.trim().slice(0, 60);
+  return {
+    id: row.id,
+    code: row.code,
+    title: normalizedTitle || `${row.reviewDate} 复盘`,
+    reviewDate: row.reviewDate,
+    expectation: row.expectation,
+    result: row.result,
+    reason: row.reason,
+    actionPlan: row.actionPlan,
+    tags: parseTagsJson(row.tagsJson),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+export function listFundReviewNotes(code: string, db = getDb()): FundReviewNote[] {
+  return (
+    db
+      .prepare(
+        `
+      SELECT
+        id AS id,
+        code AS code,
+        title AS title,
+        review_date AS reviewDate,
+        expectation AS expectation,
+        result AS result,
+        reason AS reason,
+        action_plan AS actionPlan,
+        tags_json AS tagsJson,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM fund_review_notes
+      WHERE code = ?
+      ORDER BY review_date DESC, updated_at DESC
+      `
+      )
+    .all(code) as Array<{
+      id: string;
+      code: string;
+      title: string;
+      reviewDate: string;
+      expectation: string;
+      result: string;
+      reason: string;
+      actionPlan: string;
+      tagsJson: string;
+      createdAt: string;
+      updatedAt: string;
+    }>
+  ).map(mapReviewRow);
+}
+
+export function createFundReviewNote(
+  input: {
+    code: string;
+    title: string;
+    reviewDate: string;
+    expectation: string;
+    result: string;
+    reason: string;
+    actionPlan: string;
+    tags: string[];
+  },
+  db = getDb()
+): FundReviewNote {
+  if (!hasWatchlistItem(input.code, db)) {
+    throw new Error("该基金不在自选列表中");
+  }
+
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(
+    `
+      INSERT INTO fund_review_notes (
+        id, code, title, review_date, expectation, result, reason, action_plan, tags_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
+  ).run(
+    id,
+    input.code,
+    input.title,
+    input.reviewDate,
+    input.expectation,
+    input.result,
+    input.reason,
+    input.actionPlan,
+    JSON.stringify(input.tags ?? []),
+    now,
+    now
+  );
+
+  const row = db
+    .prepare(
+      `
+      SELECT
+        id AS id,
+        code AS code,
+        title AS title,
+        review_date AS reviewDate,
+        expectation AS expectation,
+        result AS result,
+        reason AS reason,
+        action_plan AS actionPlan,
+        tags_json AS tagsJson,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM fund_review_notes
+      WHERE id = ?
+      `
+    )
+    .get(id) as {
+    id: string;
+    code: string;
+    title: string;
+    reviewDate: string;
+    expectation: string;
+    result: string;
+    reason: string;
+    actionPlan: string;
+    tagsJson: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+
+  return mapReviewRow(row);
+}
+
+export function updateFundReviewNote(
+  input: {
+    id: string;
+    code: string;
+    title: string;
+    reviewDate: string;
+    expectation: string;
+    result: string;
+    reason: string;
+    actionPlan: string;
+    tags: string[];
+  },
+  db = getDb()
+): FundReviewNote {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `
+      UPDATE fund_review_notes
+      SET
+        title = ?,
+        review_date = ?,
+        expectation = ?,
+        result = ?,
+        reason = ?,
+        action_plan = ?,
+        tags_json = ?,
+        updated_at = ?
+      WHERE id = ? AND code = ?
+      `
+    )
+    .run(
+      input.title,
+      input.reviewDate,
+      input.expectation,
+      input.result,
+      input.reason,
+      input.actionPlan,
+      JSON.stringify(input.tags ?? []),
+      now,
+      input.id,
+      input.code
+    );
+
+  if (result.changes === 0) {
+    throw new ReviewNoteNotFoundError();
+  }
+
+  const row = db
+    .prepare(
+      `
+      SELECT
+        id AS id,
+        code AS code,
+        title AS title,
+        review_date AS reviewDate,
+        expectation AS expectation,
+        result AS result,
+        reason AS reason,
+        action_plan AS actionPlan,
+        tags_json AS tagsJson,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM fund_review_notes
+      WHERE id = ?
+      `
+    )
+    .get(input.id) as {
+    id: string;
+    code: string;
+    title: string;
+    reviewDate: string;
+    expectation: string;
+    result: string;
+    reason: string;
+    actionPlan: string;
+    tagsJson: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+
+  return mapReviewRow(row);
+}
+
+export function deleteFundReviewNote(id: string, code: string, db = getDb()): boolean {
+  const result = db.prepare("DELETE FROM fund_review_notes WHERE id = ? AND code = ?").run(id, code);
+  return result.changes > 0;
+}
+
+function normalizeChecklistStatus(status: string): DecisionChecklistStatus {
+  if (status === "done" || status === "invalid") {
+    return status;
+  }
+  return "todo";
+}
+
+function normalizeChecklistPriority(priority: string): DecisionChecklistPriority {
+  if (priority === "high" || priority === "low") {
+    return priority;
+  }
+  return "medium";
+}
+
+function mapChecklistRow(row: {
+  id: string;
+  code: string;
+  tradeDate: string;
+  triggerCondition: string;
+  actionPlan: string;
+  invalidCondition: string;
+  reviewNote: string;
+  status: string;
+  priority: string;
+  archivedReviewId: string | null;
+  updatedAt: string;
+}): DecisionChecklistItem {
+  return {
+    id: row.id,
+    code: row.code,
+    tradeDate: row.tradeDate,
+    triggerCondition: row.triggerCondition,
+    actionPlan: row.actionPlan,
+    invalidCondition: row.invalidCondition,
+    reviewNote: row.reviewNote,
+    status: normalizeChecklistStatus(row.status),
+    priority: normalizeChecklistPriority(row.priority),
+    archivedReviewId: row.archivedReviewId,
+    updatedAt: row.updatedAt
+  };
+}
+
+function upsertChecklistArchiveToReview(itemId: string, db = getDb()): string | null {
+  const row = db
+    .prepare(
+      `
+      SELECT
+        id AS id,
+        code AS code,
+        trade_date AS tradeDate,
+        trigger_condition AS triggerCondition,
+        action_plan AS actionPlan,
+        invalid_condition AS invalidCondition,
+        review_note AS reviewNote,
+        status AS status,
+        archived_review_id AS archivedReviewId
+      FROM fund_decision_checklist_items
+      WHERE id = ?
+      `
+    )
+    .get(itemId) as
+    | {
+        id: string;
+        code: string;
+        tradeDate: string;
+        triggerCondition: string;
+        actionPlan: string;
+        invalidCondition: string;
+        reviewNote: string;
+        status: string;
+        archivedReviewId: string | null;
+      }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  const status = normalizeChecklistStatus(row.status);
+  if (status === "todo") {
+    return null;
+  }
+  if (row.reviewNote.trim().length === 0) {
+    return null;
+  }
+  if (row.archivedReviewId) {
+    return row.archivedReviewId;
+  }
+
+  const reviewId = randomUUID();
+  const now = new Date().toISOString();
+  const fallbackTitle = row.triggerCondition.trim().slice(0, 60) || `${row.tradeDate} 复盘`;
+  db.prepare(
+    `
+      INSERT INTO fund_review_notes (
+        id, code, title, review_date, expectation, result, reason, action_plan, record_kind, source_checklist_item_id, tags_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'decision', ?, ?, ?, ?)
+      `
+  ).run(
+    reviewId,
+    row.code,
+    fallbackTitle,
+    row.tradeDate,
+    row.triggerCondition,
+    row.reviewNote,
+    row.invalidCondition,
+    row.actionPlan,
+    row.id,
+    JSON.stringify(["checklist", status]),
+    now,
+    now
+  );
+
+  db.prepare("UPDATE fund_decision_checklist_items SET archived_review_id = ?, updated_at = ? WHERE id = ?").run(
+    reviewId,
+    now,
+    row.id
+  );
+  return reviewId;
+}
+
+export function listDecisionChecklistItems(
+  code: string,
+  tradeDate: string,
+  db = getDb()
+): DecisionChecklistItem[] {
+  return (
+    db
+      .prepare(
+        `
+      SELECT
+        id AS id,
+        code AS code,
+        trade_date AS tradeDate,
+        trigger_condition AS triggerCondition,
+        action_plan AS actionPlan,
+        invalid_condition AS invalidCondition,
+        review_note AS reviewNote,
+        status AS status,
+        priority AS priority,
+        archived_review_id AS archivedReviewId,
+        updated_at AS updatedAt
+      FROM fund_decision_checklist_items
+      WHERE code = ? AND trade_date = ?
+      ORDER BY
+        CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC,
+        updated_at DESC
+      `
+      )
+      .all(code, tradeDate) as Array<{
+      id: string;
+      code: string;
+      tradeDate: string;
+      triggerCondition: string;
+      actionPlan: string;
+      invalidCondition: string;
+      reviewNote: string;
+      status: string;
+      priority: string;
+      archivedReviewId: string | null;
+      updatedAt: string;
+    }>
+  ).map(mapChecklistRow);
+}
+
+export function createDecisionChecklistItem(
+  input: {
+    code: string;
+    tradeDate: string;
+    triggerCondition: string;
+    actionPlan: string;
+    invalidCondition: string;
+    reviewNote: string;
+    status: DecisionChecklistStatus;
+    priority: DecisionChecklistPriority;
+  },
+  db = getDb()
+): DecisionChecklistItem {
+  if (!hasWatchlistItem(input.code, db)) {
+    throw new Error("该基金不在自选列表中");
+  }
+  const now = new Date().toISOString();
+  const id = randomUUID();
+  db.prepare(
+    `
+      INSERT INTO fund_decision_checklist_items (
+        id, code, trade_date, trigger_condition, action_plan, invalid_condition, review_note, status, priority, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `
+  ).run(
+    id,
+    input.code,
+    input.tradeDate,
+    input.triggerCondition,
+    input.actionPlan,
+    input.invalidCondition,
+    input.reviewNote,
+    input.status,
+    input.priority,
+    now
+  );
+
+  upsertChecklistArchiveToReview(id, db);
+  const row = db
+    .prepare(
+      `
+      SELECT
+        id AS id,
+        code AS code,
+        trade_date AS tradeDate,
+        trigger_condition AS triggerCondition,
+        action_plan AS actionPlan,
+        invalid_condition AS invalidCondition,
+        review_note AS reviewNote,
+        status AS status,
+        priority AS priority,
+        archived_review_id AS archivedReviewId,
+        updated_at AS updatedAt
+      FROM fund_decision_checklist_items
+      WHERE id = ?
+      `
+    )
+    .get(id) as {
+    id: string;
+    code: string;
+    tradeDate: string;
+    triggerCondition: string;
+    actionPlan: string;
+    invalidCondition: string;
+    reviewNote: string;
+    status: string;
+    priority: string;
+    archivedReviewId: string | null;
+    updatedAt: string;
+  };
+  return mapChecklistRow(row);
+}
+
+export function updateDecisionChecklistItem(
+  input: {
+    id: string;
+    code: string;
+    tradeDate: string;
+    triggerCondition: string;
+    actionPlan: string;
+    invalidCondition: string;
+    reviewNote: string;
+    status: DecisionChecklistStatus;
+    priority: DecisionChecklistPriority;
+  },
+  db = getDb()
+): DecisionChecklistItem {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `
+      UPDATE fund_decision_checklist_items
+      SET
+        trade_date = ?,
+        trigger_condition = ?,
+        action_plan = ?,
+        invalid_condition = ?,
+        review_note = ?,
+        status = ?,
+        priority = ?,
+        updated_at = ?
+      WHERE id = ? AND code = ?
+      `
+    )
+    .run(
+      input.tradeDate,
+      input.triggerCondition,
+      input.actionPlan,
+      input.invalidCondition,
+      input.reviewNote,
+      input.status,
+      input.priority,
+      now,
+      input.id,
+      input.code
+    );
+  if (result.changes === 0) {
+    throw new DecisionChecklistNotFoundError();
+  }
+
+  upsertChecklistArchiveToReview(input.id, db);
+  const row = db
+    .prepare(
+      `
+      SELECT
+        id AS id,
+        code AS code,
+        trade_date AS tradeDate,
+        trigger_condition AS triggerCondition,
+        action_plan AS actionPlan,
+        invalid_condition AS invalidCondition,
+        review_note AS reviewNote,
+        status AS status,
+        priority AS priority,
+        archived_review_id AS archivedReviewId,
+        updated_at AS updatedAt
+      FROM fund_decision_checklist_items
+      WHERE id = ?
+      `
+    )
+    .get(input.id) as {
+    id: string;
+    code: string;
+    tradeDate: string;
+    triggerCondition: string;
+    actionPlan: string;
+    invalidCondition: string;
+    reviewNote: string;
+    status: string;
+    priority: string;
+    archivedReviewId: string | null;
+    updatedAt: string;
+  };
+  return mapChecklistRow(row);
+}
+
+export function deleteDecisionChecklistItem(id: string, code: string, db = getDb()): boolean {
+  const result = db.prepare("DELETE FROM fund_decision_checklist_items WHERE id = ? AND code = ?").run(id, code);
+  return result.changes > 0;
+}
+
+export function getDecisionSummaryByCodes(
+  codes: string[],
+  tradeDate = getTodayShanghai(),
+  db = getDb()
+): Record<string, DecisionPanelSummary> {
+  if (codes.length === 0) {
+    return {};
+  }
+  const placeholders = codes.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `
+      SELECT
+        code AS code,
+        SUM(CASE WHEN status = 'todo' THEN 1 ELSE 0 END) AS todoCount,
+        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS doneCount,
+        SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) AS invalidCount
+      FROM fund_decision_checklist_items
+      WHERE code IN (${placeholders})
+        AND trade_date = ?
+      GROUP BY code
+      `
+    )
+    .all(...codes, tradeDate) as Array<{
+    code: string;
+    todoCount: number;
+    doneCount: number;
+    invalidCount: number;
+  }>;
+
+  const map: Record<string, DecisionPanelSummary> = {};
+  for (const row of rows) {
+    const done = row.doneCount ?? 0;
+    const invalid = row.invalidCount ?? 0;
+    const denominator = done + invalid;
+    map[row.code] = {
+      todoCount: row.todoCount ?? 0,
+      doneCount: done,
+      invalidCount: invalid,
+      winRateHint: denominator > 0 ? round2((done / denominator) * 100) : null
+    };
+  }
+  return map;
+}
+
+function listLatestReviewByCodes(codes: string[], db = getDb()): Record<string, FundReviewNote> {
+  if (codes.length === 0) {
+    return {};
+  }
+
+  const placeholders = codes.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `
+      SELECT
+        fr.id AS id,
+        fr.code AS code,
+        fr.title AS title,
+        fr.review_date AS reviewDate,
+        fr.expectation AS expectation,
+        fr.result AS result,
+        fr.reason AS reason,
+        fr.action_plan AS actionPlan,
+        fr.tags_json AS tagsJson,
+        fr.created_at AS createdAt,
+        fr.updated_at AS updatedAt
+      FROM fund_review_notes fr
+      INNER JOIN (
+        SELECT code, MAX(updated_at) AS maxUpdatedAt
+        FROM fund_review_notes
+        WHERE code IN (${placeholders})
+        GROUP BY code
+      ) latest
+        ON latest.code = fr.code
+       AND latest.maxUpdatedAt = fr.updated_at
+      `
+    )
+    .all(...codes) as Array<{
+    id: string;
+    code: string;
+    title: string;
+    reviewDate: string;
+    expectation: string;
+    result: string;
+    reason: string;
+    actionPlan: string;
+    tagsJson: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+
+  const mapped: Record<string, FundReviewNote> = {};
+  for (const row of rows) {
+    mapped[row.code] = mapReviewRow(row);
+  }
+  return mapped;
 }
 
 function normalizeDecimal(value: number, precision = 6): number {
@@ -795,6 +1751,15 @@ export function listFundCards(
     rows.map((row) => row.code),
     db
   );
+  const latestReviewByCode = listLatestReviewByCodes(
+    rows.map((row) => row.code),
+    db
+  );
+  const decisionSummaryByCode = getDecisionSummaryByCodes(
+    rows.map((row) => row.code),
+    date,
+    db
+  );
 
   return rows.map((row) => ({
     position:
@@ -824,7 +1789,14 @@ export function listFundCards(
     stale: isStale(row.quoteTs),
     instrumentType: row.instrumentType ?? detectFundInstrumentType(row.code),
     source: row.source ?? null,
-    groups: membershipsByCode[row.code] ?? []
+    groups: membershipsByCode[row.code] ?? [],
+    latestReview: latestReviewByCode[row.code] ?? null,
+    decisionSummary: decisionSummaryByCode[row.code] ?? {
+      todoCount: 0,
+      doneCount: 0,
+      invalidCount: 0,
+      winRateHint: null
+    }
   }));
 }
 

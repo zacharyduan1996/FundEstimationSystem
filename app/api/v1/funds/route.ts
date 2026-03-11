@@ -6,6 +6,7 @@ import {
   GroupNotFoundError,
   getCollectorState,
   getDb,
+  getGroupPerformanceSummary,
   insertIntradayPoint,
   listFundGroups,
   listGroupTabs,
@@ -114,6 +115,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const query = request.nextUrl.searchParams.get("query") ?? "";
     const sortBy = resolveSortBy(request.nextUrl.searchParams.get("sortBy"));
     const groupFilter = resolveGroupFilter(request.nextUrl.searchParams.get("groupId"));
+    const workspace = request.nextUrl.searchParams.get("workspace") ?? "dashboard";
 
     const watchlist = listWatchlist();
     let funds = listFundCards({ query, sortBy, groupFilter });
@@ -146,12 +148,20 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const collectorState = getCollectorState();
     const groups = listFundGroups();
     const groupTabs = listGroupTabs();
+    const groupPerformance = getGroupPerformanceSummary(groupFilter);
+    const decisionSummaryByFund = Object.fromEntries(
+      funds.map((fund) => [fund.code, fund.decisionSummary ?? { todoCount: 0, doneCount: 0, invalidCount: 0, winRateHint: null }])
+    );
     return NextResponse.json({
+      workspace,
       query,
       sortBy,
       groupFilter,
       groups,
       groupTabs,
+      groupPerformance,
+      focusedCode: workspace === "intraday" ? funds[0]?.code ?? null : null,
+      decisionSummaryByFund,
       funds,
       loadingState,
       lastUpdatedAt: collectorState.lastSuccessAt

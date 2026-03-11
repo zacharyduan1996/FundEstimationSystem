@@ -67,6 +67,65 @@ export interface GroupTabStat {
   kind: "all" | "manual" | "ungrouped";
 }
 
+export interface GroupPerformanceSummary {
+  groupId: GroupFilter;
+  groupName: string;
+  memberCount: number;
+  todayAvgDeltaPct: number | null;
+  sevenDayReturnPct: number | null;
+  updatedAt: string | null;
+}
+
+export interface FundReviewNote {
+  id: string;
+  code: string;
+  title: string;
+  reviewDate: string;
+  expectation: string;
+  result: string;
+  reason: string;
+  actionPlan: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type DecisionChecklistStatus = "todo" | "done" | "invalid";
+export type DecisionChecklistPriority = "high" | "medium" | "low";
+
+export interface DecisionChecklistItem {
+  id: string;
+  code: string;
+  tradeDate: string;
+  triggerCondition: string;
+  actionPlan: string;
+  invalidCondition: string;
+  reviewNote: string;
+  status: DecisionChecklistStatus;
+  priority: DecisionChecklistPriority;
+  archivedReviewId: string | null;
+  updatedAt: string;
+}
+
+export interface DecisionPanelSummary {
+  todoCount: number;
+  doneCount: number;
+  invalidCount: number;
+  winRateHint: number | null;
+}
+
+export interface FocusedFundState {
+  focusedCode: string | null;
+  focusedAt: string | null;
+}
+
+export interface BatchSelectionState {
+  isSelecting: boolean;
+  selectedCodes: string[];
+  pendingAction: "idle" | "applyGroup" | "delete";
+  batchError?: string | null;
+}
+
 export interface FundCardData {
   code: string;
   name: string;
@@ -83,6 +142,8 @@ export interface FundCardData {
   position: PositionSnapshot | null;
   positionMetrics: PositionMetrics;
   groups: FundGroupMembership[];
+  latestReview: FundReviewNote | null;
+  decisionSummary?: DecisionPanelSummary;
 }
 
 export interface UIState {
@@ -98,6 +159,9 @@ export interface UIState {
   historyRangeByFund?: Record<string, HistoryRange>;
   editingPositionFundCode?: string;
   positionSavingByFund?: Record<string, boolean>;
+  reviewSelectedIdByFund?: Record<string, string | null>;
+  reviewDraftDirty?: boolean;
+  reviewListQueryByFund?: Record<string, string>;
   maskAmounts?: boolean;
   isAddOpen: boolean;
   isRefreshing: boolean;

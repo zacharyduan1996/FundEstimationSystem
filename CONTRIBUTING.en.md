@@ -5,7 +5,7 @@ Thanks for your interest in contributing to Fund Estimation System.
 ## 1) Workflow
 
 1. Fork this repository
-2. Create a branch from `main`
+2. Create a branch from `develop`
 3. Make your changes
 4. Add/adjust tests when needed
 5. Ensure checks pass
@@ -13,9 +13,10 @@ Thanks for your interest in contributing to Fund Estimation System.
 
 ```bash
 git checkout -b feat/your-change
-npm test
-npm run build
+npm run verify
 ```
+
+PR target branch: `develop`
 
 ## 2) Commit Style
 
@@ -37,8 +38,7 @@ Use Conventional Commits where possible:
 ## 4) Pull Request Checklist
 
 - [ ] PR description explains purpose and scope
-- [ ] `npm test` passes
-- [ ] `npm run build` passes
+- [ ] `npm run verify` passes
 - [ ] No secrets or local machine paths added
 - [ ] README/docs updated when behavior changes
 

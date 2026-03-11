@@ -48,7 +48,19 @@
 
 ![History Panel](./docs/images/history-panel.png)
 
-### 5) 搜索、排序与隐私模式
+### 5) 盘中实时笔记与复盘管理
+
+- 右侧侧栏支持盘中实时记录（回车快速保存）
+- 点击 `打开复盘` 进入双栏复盘工作台（左侧历史标题，右侧编辑内容）
+- 支持标题搜索、按日期分组浏览、`Cmd/Ctrl+S` 快捷保存
+
+### 6) 盘中工作台快捷操作
+
+- 主区域支持三列基金卡片平铺，快速查看更多标的
+- 键盘可用：`↑/↓/←/→` 切换焦点基金，`/` 聚焦搜索框，`n` 聚焦实时笔记输入
+- 复盘弹窗支持：`Esc` 关闭、`↑/↓` 切换笔记、`Cmd/Ctrl+S` 保存
+
+### 7) 搜索、排序与隐私模式
 
 - 搜索：输入基金代码关键词，支持回车立即查询
 - 排序：默认 / 涨幅优先 / 跌幅优先
@@ -61,6 +73,8 @@
 - 分组管理：分组 CRUD、重排、多分组归属、未分组视图
 - 持仓快照：录入份额 + 成本，展示市值与盈亏
 - 历史分析：多区间净值分析与回撤指标
+- 盘中工作台：主栏三列卡片 + 右侧实时笔记，聚焦基金后就地记录
+- 笔记体系：盘中速记 + 历史复盘双栏工作台
 - 状态反馈：空态、无结果、错误、延迟、加载提示
 - 一键启动：macOS / Windows 自动安装依赖并启动
 
@@ -83,10 +97,10 @@ npm run dev
 ### 测试与构建
 
 ```bash
-npm test
-npm run build
-npm run start
+npm run verify
 ```
+
+`verify` 会执行：lint + typecheck + test + build
 
 ## 一键启动（普通用户）
 
@@ -114,6 +128,15 @@ npm run start
 - 重试回退：`2s`、`5s`
 - 数据保留：日内点位保留 `30 天`
 
+## 工程化规范
+
+- 默认开发分支：`develop`（`main` 仅用于稳定发布）
+- 开发前从 `develop` 拉分支，PR 合并回 `develop`
+- 提交前必须执行 `npm run verify`
+- 提交信息使用 Conventional Commits（`feat:` / `fix:` / `docs:` 等）
+- 详细规范见：`docs/engineering-standards.md`
+- Agent 约束见：`AGENTS.md`
+
 ## 环境变量
 
 - `DATABASE_PATH`（可选）
@@ -127,6 +150,14 @@ npm run start
 - `POST /api/v1/funds`
 - `DELETE /api/v1/funds/{code}`
 - `PUT /api/v1/funds/{code}/groups`
+- `GET /api/v1/funds/{code}/checklist`
+- `POST /api/v1/funds/{code}/checklist`
+- `PUT /api/v1/funds/{code}/checklist/{id}`
+- `DELETE /api/v1/funds/{code}/checklist/{id}`
+- `GET /api/v1/funds/{code}/reviews`
+- `POST /api/v1/funds/{code}/reviews`（`title` 必填）
+- `PUT /api/v1/funds/{code}/reviews/{id}`（支持更新 `title`）
+- `DELETE /api/v1/funds/{code}/reviews/{id}`
 - `GET /api/v1/funds/{code}/trend?date=YYYY-MM-DD`
 - `GET /api/v1/funds/{code}/history?range=7D|30D|90D|180D|1Y`
 
@@ -142,6 +173,11 @@ npm run start
 - `PATCH /api/v1/groups/{id}`
 - `DELETE /api/v1/groups/{id}`
 - `PUT /api/v1/groups/reorder`
+
+### 批量
+
+- `PUT /api/v1/funds/batch/groups`
+- `DELETE /api/v1/funds/batch`
 
 ### 系统
 
