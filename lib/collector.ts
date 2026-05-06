@@ -69,6 +69,17 @@ export async function collectOnce(
 
   if (!trading || watchlist.length === 0) {
     cleanupOldPoints(RETENTION_DAYS, db);
+    // 即使不在交易时间或观察列表为空，也更新lastSuccessAt字段
+    updateCollectorState(
+      {
+        lastSuccessAt: nowIso,
+        lastError: null,
+        consecutiveFailures: 0,
+        sourceHealthy: true,
+        isTradingTime: trading
+      },
+      db
+    );
     return { success: 0, failed: 0 };
   }
 

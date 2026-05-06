@@ -18,10 +18,13 @@ import {
   GripVertical,
   Inbox,
   LoaderCircle,
+  Moon,
   Plus,
+  RefreshCw,
   Search,
   Settings2,
   SlidersHorizontal,
+  Sun,
   Square,
   Trash2,
   TrendingDown,
@@ -31,6 +34,7 @@ import {
 } from "lucide-react";
 import HistoryLineChart from "@/components/history-line-chart";
 import Sparkline from "@/components/sparkline";
+
 import { REFRESH_INTERVAL_MS } from "@/lib/constants";
 import { DEFAULT_HISTORY_RANGE } from "@/lib/history";
 import type {
@@ -1027,6 +1031,7 @@ export default function Dashboard() {
   const [checklistLoadingByFund, setChecklistLoadingByFund] = useState<Record<string, boolean>>({});
   const [checklistSavingByFund, setChecklistSavingByFund] = useState<Record<string, boolean>>({});
   const [realtimeNoteInput, setRealtimeNoteInput] = useState("");
+  const [isDarkMode, setIsDarkMode] = useState(false);
 
   const latestRequestIdRef = useRef(0);
   const hasLoadedRef = useRef(false);
@@ -1125,6 +1130,28 @@ export default function Dashboard() {
       // ignore storage errors
     }
   }, [maskAmounts]);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("theme");
+      setIsDarkMode(saved === "dark");
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("theme", isDarkMode ? "dark" : "light");
+      if (isDarkMode) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      } else {
+        document.documentElement.removeAttribute("data-theme");
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, [isDarkMode]);
 
   useEffect(() => {
     const debounce = setTimeout(() => {
@@ -2561,6 +2588,16 @@ export default function Dashboard() {
               <button
                 type="button"
                 className="privacy-toggle-btn"
+                onClick={() => setIsDarkMode((prev) => !prev)}
+                aria-pressed={isDarkMode}
+                aria-label="切换主题模式"
+              >
+                {isDarkMode ? <Sun size={12} /> : <Moon size={12} />}
+                {isDarkMode ? "浅色模式" : "深色模式"}
+              </button>
+              <button
+                type="button"
+                className="privacy-toggle-btn"
                 onClick={() => setMaskAmounts((prev) => !prev)}
                 aria-pressed={maskAmounts}
                 aria-label="切换金额隐私模式"
@@ -2568,10 +2605,43 @@ export default function Dashboard() {
                 {maskAmounts ? <EyeOff size={12} /> : <Eye size={12} />}
                 {maskAmounts ? "金额已隐藏" : "金额隐私"}
               </button>
-              <span className="last-updated">
-                最近刷新：{formatLastUpdatedAt(lastUpdatedAt)}
-                {isRefreshing ? " · 更新中" : ""}
-              </span>
+              <div className="last-updated">
+                <span>最近刷新：{formatLastUpdatedAt(lastUpdatedAt)}</span>
+                <button
+                  type="button"
+                  className="refresh-btn"
+                  onClick={async () => {
+                    // 立即设置为刷新中状态，防止用户重复点击
+                    setIsRefreshing(true);
+                    try {
+                      // 调用API端点触发数据刷新
+                      const response = await fetch('/api/v1/system/refresh', {
+                        method: 'POST',
+                        cache: 'no-store'
+                      });
+                      
+                      const result = await response.json();
+                      if (!response.ok) {
+                        throw new Error(result.error || '刷新数据失败');
+                      }
+                      
+                      // 刷新数据成功后，重新获取数据
+                      await fetchFunds({ showLoading: true });
+                    } catch (error) {
+                      console.error("刷新数据失败:", error);
+                      showToast("error", "刷新数据失败，请稍后重试");
+                    } finally {
+                      // 无论成功或失败，都设置为非刷新状态
+                      setIsRefreshing(false);
+                    }
+                  }}
+                  disabled={isRefreshing}
+                  aria-label="手动刷新数据"
+                >
+                  <RefreshCw size={12} className={isRefreshing ? "spin-icon" : ""} />
+                  {isRefreshing ? "刷新中" : "刷新"}
+                </button>
+              </div>
             </div>
           </div>
 
